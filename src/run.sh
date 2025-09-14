@@ -1,8 +1,8 @@
-#python -m venv .venv
-#source .venv/bin/activate
-#
-#pip install --upgrade pip
-#pip install nerfstudio gsplat
+python -m venv .venv
+source .venv/bin/activate
+
+pip install --upgrade pip
+pip install nerfstudio gsplat
 sudo apt-get update && sudo apt-get install -y ffmpeg colmap
 sudo apt-get update && sudo apt-get install -y xvfb
 
