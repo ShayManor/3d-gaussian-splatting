@@ -1,52 +1,68 @@
-# ---- Base with CUDA toolchain (for building any CUDA/C++ extensions) ----
-FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
+# syntax=docker/dockerfile:1
+FROM vastai/pytorch:2.2.2-cuda-12.1.1-py310-ipv2
 
-# Noninteractive apt, sane Python defaults
-ENV DEBIAN_FRONTEND=noninteractive \
-    PIP_NO_CACHE_DIR=1 \
-    PYTHONUNBUFFERED=1 \
-    # Force CUDA extensions if packages attempt to detect CUDA
-    FORCE_CUDA=1 \
-    # Target common GPU archs; adjust as needed (30 series, 40 series, 50 series, H100/H200, no A100)
-    TORCH_CUDA_ARCH_LIST="8.6;8.9;9.0;12.0"
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
 
-# System packages:
-# - python3, pip: Python runtime and package manager
-# - build-essential, cmake, ninja-build: build toolchain for native/ CUDA exts
-# - ffmpeg, colmap, xvfb: what your script installed at runtime
-# - git, wget, curl: useful during builds
-# - libgl1, libglib2.0-0, libx* : OpenGL/X deps frequently needed by viewers/tools
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv \
-    build-essential cmake ninja-build \
-    ffmpeg colmap xvfb \
-    git wget curl ca-certificates \
-    libgl1 libglib2.0-0 libxext6 libxrender1 libsm6 libx11-6 \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get -o Acquire::http::Pipeline-Depth="0" \
+            -o Acquire::http::No-Cache=true \
+            -o Acquire::BrokenProxy=true \
+    update && \
+    apt-get -o Acquire::http::Pipeline-Depth="0" \
+            -o Acquire::http::No-Cache=true \
+            -o Acquire::BrokenProxy=true \
+    install -y --no-install-recommends \
+    build-essential cmake git wget curl ca-certificates \
+    python3.10 python3-pip python3.10-dev python3.10-venv \
+    libboost-program-options-dev libboost-filesystem-dev \
+    libboost-graph-dev libboost-system-dev \
+    libeigen3-dev libfreeimage-dev libmetis-dev \
+    libgoogle-glog-dev libgflags-dev libsqlite3-dev libboost-all-dev \
+    ffmpeg vim tmux htop && \
+    rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip first
-RUN python3 -m pip install --upgrade pip
+RUN apt-get -o Acquire::http::Pipeline-Depth="0" \
+            -o Acquire::http::No-Cache=true \
+            -o Acquire::BrokenProxy=true \
+    update && \
+    apt-get -o Acquire::http::Pipeline-Depth="0" \
+            -o Acquire::http::No-Cache=true \
+            -o Acquire::BrokenProxy=true \
+    install -y --no-install-recommends \
+    libglew-dev qtbase5-dev libqt5opengl5-dev libcgal-dev \
+    libceres-dev libflann-dev s3cmd || true && \
+    rm -rf /var/lib/apt/lists/*
 
-# ---- PyTorch (GPU) ----
-# Use the official CUDA wheels index. Default to cu121 wheels which are broadly compatible
-# with 12.x drivers. If you need a specific combo, set at build time:
-#   --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu124
-#   --build-arg TORCH_PACKAGES="torch torchvision torchaudio"
-ARG TORCH_INDEX="https://download.pytorch.org/whl/cu121"
-ARG TORCH_PACKAGES="torch torchvision"
-RUN python3 -m pip install --extra-index-url ${TORCH_INDEX} ${TORCH_PACKAGES}
+RUN git clone https://github.com/colmap/colmap.git /tmp/colmap \
+    && cd /tmp/colmap \
+    && git checkout 3.9.1 \
+    && mkdir build && cd build \
+    && cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCUDA_ENABLED=ON \
+        -DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90" \
+        -DCUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-12.1 \
+    && make -j$(nproc) \
+    && make install \
+    && rm -rf /tmp/colmap
 
-# (Optional but often helpful) xformers can speed attention ops
-RUN python3 -m pip install --extra-index-url ${TORCH_INDEX} xformers
 
-# Project libraries baked in
-RUN python3 -m pip install -r requirements.txt
+RUN python3.10 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Ensure dynamic linker cache is updated for any libs
-RUN ldconfig
+RUN wget https://github.com/peak/s5cmd/releases/download/v2.2.2/s5cmd_2.2.2_Linux-64bit.tar.gz \
+    && tar xzf s5cmd_2.2.2_Linux-64bit.tar.gz \
+    && mv s5cmd /usr/local/bin/ \
+    && rm s5cmd_2.2.2_Linux-64bit.tar.gz
 
-# Workspace convention
+RUN python3.10 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+RUN pip install --upgrade pip setuptools wheel
+RUN pip install torch==2.2.0 torchvision==0.17.0 --index-url https://download.pytorch.org/whl/cu121
+RUN pip install numpy scipy matplotlib opencv-python-headless nerfstudio kornia transformers datasets scipy
+
 WORKDIR /workspace
-
-# Default shell; keep container interactive by default.
-ENTRYPOINT ["/bin/bash"]
+CMD ["/bin/bash"]

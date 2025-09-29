@@ -1,0 +1,75 @@
+name: Build and Push to GHCR
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'Dockerfile'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'Dockerfile'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: evc-purdue/3dgs-image
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Free disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" \
+                     /usr/local/lib/android /usr/local/.ghcup || true
+        docker system prune -af || true
+        sudo apt-get clean
+        df -h
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      with:
+        driver-opts: |
+          network=host
+          env.BUILDKIT_STEP_LOG_MAX_SIZE=50000000
+          env.BUILDKIT_STEP_LOG_MAX_SPEED=10000000
+
+    - name: Log in to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=sha,prefix={{branch}}-
+          type=raw,value=cuda12.1
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push (cached)
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        push: true
+        platforms: linux/amd64
+        tags: |
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:cuda12.1
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
