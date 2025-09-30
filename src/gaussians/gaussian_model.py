@@ -100,3 +100,91 @@ class GaussianModel(nn.Module):
             # Reset gradients
             self.xyz_gradient_counts.zero_()
             self.xyz_gradient_accum.zero_()
+
+    def _clone_gaussians(self, mask):
+        """
+        Clones the masked gaussians
+        :param mask: The given mask
+        """
+        new_xyz = self.xyz[mask]
+        new_features_dc = self.features_dc[mask]
+        new_features_rest = self.features_rest[mask]
+        new_opacity = self.opacity[mask]
+        new_scaling = self.scaling[mask]
+        new_rotation = self.rotation[mask]
+
+        self.densify(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
+
+    def _split_gaussians(self, mask):
+        """
+        Splits large gaussians / high gradients into smaller ones
+        :param mask: Mask for which to split
+        """
+        n_splits = 2
+
+        # Get Gaussians to split
+        xyz = self.xyz[mask]
+        features_dc = self.features_dc[mask].repeat(n_splits, 1, 1)
+        features_rest = self.features_rest[mask].repeat(n_splits, 1, 1)
+        opacity = self.opacity[mask].repeat(n_splits, 1)
+        scaling = self.scaling[mask].repeat(n_splits, 1)
+        rotation = self.rotation[mask].repeat(n_splits, 1)
+
+        # Reduces scaling and adds noise to positions to remove. 1.6 was used by others (plagiarized)
+        scaling = scaling - torch.log(torch.tensor(1.6, device=scaling.device))
+
+        scales = self.get_scaling[mask].repeat(n_splits, 1)
+        # rotations = self.get_rotation[mask].repeat(n_splits, 1)
+
+        # Samples by creating a new random normal tensor in the same shape repeated
+        samples = torch.randn_like(xyz.repeat(n_splits, 1)) * scales[:, :3]
+        xyz = xyz.repeat(n_splits, 1) + samples
+
+        # Remove original
+        self._prune_gaussians(~mask)
+        self.densify(xyz, features_dc, features_rest, opacity, scaling, rotation)
+
+    def _prune_gaussians(self, keep_mask):
+        """
+        Efficiently removes gaussians
+        :param keep_mask: Mask for gaussians to keep
+        """
+        self.xyz = nn.Parameter(self.xyz[keep_mask])
+        self.features_dc = nn.Parameter(self.features_dc[keep_mask])
+        self.features_rest = nn.Parameter(self.features_rest[keep_mask])
+        self.opacity = nn.Parameter(self.opacity[keep_mask])
+        self.scaling = nn.Parameter(self.scaling[keep_mask])
+        self.rotation = nn.Parameter(self.rotation[keep_mask])
+
+        self.xyz_gradient_accum = self.xyz_gradient_accum[keep_mask]
+        self.xyz_gradient_count = self.xyz_gradient_count[keep_mask]
+        self.max_radii2D = self.max_radii2D[keep_mask]
+
+    def densify(self, new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation):
+        """
+        Adds new gaussians efficiently from given values
+        """
+        # Concatenate parameters
+        self.xyz = nn.Parameter(torch.cat([self.xyz, new_xyz]))
+        self.features_dc = nn.Parameter(torch.cat([self.features_dc, new_features_dc]))
+        self.features_rest = nn.Parameter(torch.cat([self.features_rest, new_features_rest]))
+        self.opacity = nn.Parameter(torch.cat([self.opacity, new_opacity]))
+        self.scaling = nn.Parameter(torch.cat([self.scaling, new_scaling]))
+        self.rotation = nn.Parameter(torch.cat([self.rotation, new_rotation]))
+
+        # update stats
+        n_new = new_xyz.shape[0]
+        device = new_xyz.device
+        self.xyz_gradient_accum = torch.cat([
+            self.xyz_gradient_accum,
+            torch.zeros(n_new, 3, device=device)
+        ])
+
+        self.xyz_gradient_counts = torch.cat([
+            self.xyz_gradient_counts,
+            torch.zeros(n_new, 1, device=device)
+        ])
+        self.max_radii_2D = torch.cat([
+            self.max_radii_2D,
+            torch.zeros(n_new, device=device)
+        ])
