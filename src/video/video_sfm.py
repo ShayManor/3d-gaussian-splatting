@@ -1,7 +1,7 @@
 import numpy as np
 from lightglue import SuperPoint, LightGlue
 
-from src.calibrate import Calibrator
+from src.video.calibrate import Calibrator
 
 
 class VideoSFM:

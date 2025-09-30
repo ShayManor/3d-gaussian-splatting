@@ -2,5 +2,6 @@ scipy
 opencv-python
 transformers~=4.56.2
 datasets
+https://github.com/cvg/LightGlue.git
 kornia~=0.8.1
 torch~=2.8.0
