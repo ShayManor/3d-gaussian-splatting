@@ -6,8 +6,8 @@ from typing import List, Dict, Optional
 
 import torch
 
-from src.gaussians.gsplat_backend import GSplatBackend
-from src.gaussians.pytorch_backend import PyTorchBackend
+from src.backends.gsplat_backend import GSplatBackend
+from src.backends.pytorch_backend import PyTorchBackend
 
 
 @dataclass
@@ -19,9 +19,9 @@ class RenderCache:
     tiles_touched: torch.Tensor
     frame_idx: int
     view_matrix: torch.Tensor
-    rendered_image: any
-    alpha: float
-    depth: int
+    rendered_image: torch.Tensor
+    alpha: torch.Tensor
+    depth: torch.Tensor
 
 
 class GaussianRasterizer:
