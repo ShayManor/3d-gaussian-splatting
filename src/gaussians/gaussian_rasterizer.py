@@ -31,6 +31,7 @@ class GaussianRasterizer:
 
     def __init__(
         self,
+        K,
         device: str = "cuda",
         tile_size: int = 16,
         enable_caching: bool = True,
@@ -40,6 +41,7 @@ class GaussianRasterizer:
     ):
         """
         Create fast rasterizer
+        :param K: camera intrinsics
         :param device: Device for backend, normally cuda
         :param tile_size: Very important for memory optimization
         :param enable_caching: For caching, for many gaussians should be enabled
@@ -53,6 +55,7 @@ class GaussianRasterizer:
         self.device = torch.device(device)
         self.tile_size = tile_size
         self.num_workers = num_workers
+        self.K = K
 
         self.enable_caching = enable_caching
         self.cache_size = cache_size
@@ -86,7 +89,7 @@ class GaussianRasterizer:
                     from gsplat import rasterization, project_gaussians
 
                     log(INFO, "Using gsplat backend (fastest)")
-                    return GSplatBackend()
+                    return GSplatBackend(K)
 
                 elif backend_name == "pytorch":
                     log(INFO, "Using PyTorch backend (fallback)")

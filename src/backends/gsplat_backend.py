@@ -5,8 +5,9 @@ from gsplat import rasterization
 
 
 class GSplatBackend:
-    def __init__(self):
+    def __init__(self, K):
         self.rasterization = rasterization
+        self.K = K
 
     def render_batch(
         self,
@@ -77,13 +78,6 @@ class GSplatBackend:
 
         # Camera parameters
         viewmat = viewpoint['world_view_transform']
-        K = self._projection_to_intrinsic(
-            viewpoint['projection_matrix'],
-            viewpoint['image_width'],
-            viewpoint['image_height']
-        )
-        if 'K' in viewpoint:
-            K = viewpoint['K']
 
         renders, alphas, meta = self.rasterization(
             means=means3D,
@@ -92,7 +86,7 @@ class GSplatBackend:
             opacities=opacities,
             colors=colors,
             viewmats=viewmat[None, ...],  # Add batch dimension [1, 4, 4]
-            Ks=K[None, ...],  # Add batch dimension [1, 3, 3]
+            Ks=self.K[None, ...],  # Add batch dimension [1, 3, 3]
             width=viewpoint['image_width'],
             height=viewpoint['image_height'],
             packed=False,
@@ -128,5 +122,85 @@ class GSplatBackend:
                 result['visibility_filter'] = result['radii'] > 0
             if 'tiles_touched' in meta:
                 result['tiles_touched'] = meta['tiles_touched'][0]
+
+        return result
+
+    def render_with_depth(
+            self,
+            gaussian_params: Dict,
+            viewpoint: Dict,
+            bg_color: torch.Tensor = None,
+            render_mode: str = "RGB+ED",
+    ) -> Dict:
+        """
+        Render with explicit depth output
+        render_mode options:
+        - "RGB": Color only
+        - "D": Accumulated depth only
+        - "ED": Expected depth only
+        - "RGB+D": Color with accumulated depth
+        - "RGB+ED": Color with expected depth
+        """
+
+        if bg_color is None:
+            bg_color = torch.zeros(3, device='cuda')
+
+        # Extract parameters (same as render_single)
+        means3D = gaussian_params['means3D']
+        scales = gaussian_params['scales']
+        quats = gaussian_params['rotations']
+        opacities = gaussian_params['opacities']
+
+        if opacities.dim() == 2:
+            opacities = opacities.squeeze(-1)
+
+        colors = gaussian_params.get('colors', gaussian_params.get('shs'))
+        sh_degree = 3 if 'shs' in gaussian_params else None
+
+        # Camera parameters
+        viewmat = viewpoint['world_view_transform']
+
+        # Render with specified mode
+        renders, alphas, meta = self.rasterization(
+            means=means3D,
+            quats=quats,
+            scales=scales,
+            opacities=opacities,
+            colors=colors,
+            viewmats=viewmat[None, ...],
+            Ks=self.K[None, ...],
+            width=viewpoint['image_width'],
+            height=viewpoint['image_height'],
+            packed=False,
+            render_mode=render_mode,
+            sh_degree=sh_degree,
+            backgrounds=bg_color[None, ...],
+        )
+
+        # Parse output based on render mode
+        output = renders[0]
+        alpha = alphas[0]
+
+        result = {'alpha': alpha}
+
+        if render_mode == "RGB":
+            result['render'] = output  # [H, W, 3]
+        elif render_mode == "D":
+            result['accumulated_depth'] = output.squeeze(-1)  # [H, W]
+        elif render_mode == "ED":
+            result['expected_depth'] = output.squeeze(-1)  # [H, W]
+        elif render_mode == "RGB+D":
+            result['render'] = output[..., :3]  # [H, W, 3]
+            result['accumulated_depth'] = output[..., 3]  # [H, W]
+        elif render_mode == "RGB+ED":
+            result['render'] = output[..., :3]  # [H, W, 3]
+            result['expected_depth'] = output[..., 3]  # [H, W]
+
+        # Add metadata
+        if 'means2d' in meta:
+            result['means2d'] = meta['means2d'][0]
+        if 'radii' in meta:
+            result['radii'] = meta['radii'][0]
+            result['visibility_filter'] = result['radii'] > 0
 
         return result
