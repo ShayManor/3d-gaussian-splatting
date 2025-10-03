@@ -209,7 +209,7 @@ class Calibrator:
 
         print(f"Initial guess: focal={initial_focal:.1f}")
 
-        matches = self.extract_all_matches(video_path)
+        matches = self.extract_all_matches(frames)
         print(f"Number of matches: {len(matches)}")
 
         # Refine
