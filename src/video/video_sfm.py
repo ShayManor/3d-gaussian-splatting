@@ -26,7 +26,9 @@ class VideoSFM:
         :return: Poses (representation of position and orientation compared to frame)
         """
         poses = [np.identity(4)]
-        K = self.calibrator.identify_intrinsics(frames[:min(50, len(frames))], video_path)
+        K = self.calibrator.identify_intrinsics(
+            frames[: min(50, len(frames))], video_path
+        )
 
         points_3d = []
         point_colors = []
@@ -42,12 +44,14 @@ class VideoSFM:
                 [frames[prev_frame_idx], frames[frame_idx]]
             )
 
-            if not matches or len(matches[0]['pts1']) < 30:
+            if not matches or len(matches[0]["pts1"]) < 30:
                 poses.append(poses[-1])
-                log(WARNING, f"Not enough matches ({len(matches[0]['pts1'])}) in frame!")
+                log(
+                    WARNING, f"Not enough matches ({len(matches[0]['pts1'])}) in frame!"
+                )
                 continue
 
-            pts1, pts2 = matches[0]['pts1'], matches[0]['pts2']
+            pts1, pts2 = matches[0]["pts1"], matches[0]["pts2"]
 
             R, t = self.estimate_pose_from_matches(pts1, pts2, K)
             if R is None:
@@ -75,22 +79,39 @@ class VideoSFM:
             prev_frame_idx = frame_idx
 
             return {
-                'poses': np.array(poses),
-                'intrinsics': K,
-                'points_3d': np.array(points_3d) if points_3d else np.empty((0, 3)),
-                'colors': np.array(point_colors) if point_colors else np.empty((0, 3)),
-                'frame_indices': frame_indices
+                "poses": np.array(poses),
+                "intrinsics": K,
+                "points_3d": np.array(points_3d) if points_3d else np.empty((0, 3)),
+                "colors": np.array(point_colors) if point_colors else np.empty((0, 3)),
+                "frame_indices": frame_indices,
             }
-
 
     def estimate_pose_from_matches(self, pts1, pts2, K):
         """
         Estimate the relative pose from the points
         :return: Essential (3x3) matrix, mask for inline/outline
         """
-        E, mask = cv2.findEssentialMat(pts1, pts2, K, method=cv2.RANSAC, prob=0.999, threshold=1.0)
+        E, mask = cv2.findEssentialMat(
+            pts1, pts2, K, method=cv2.RANSAC, prob=0.999, threshold=1.0
+        )
         if E is None:
             return None, None
 
         _, R, t, _ = cv2.recoverPose(E, pts1, pts2, K, mask=mask)
         return R, t
+
+    def triangulate_points(self, pts1, pts2, K, pose1, pose2):
+        pass
+
+    def _filter_triangulated_points(
+        self,
+        points_3d,
+        pts1,
+        pts2,
+        P1,
+        P2,
+        max_reproj_error=5.0,
+        min_depth=0.1,
+        max_depth=100.0,
+    ):
+        pass
