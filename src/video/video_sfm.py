@@ -110,7 +110,20 @@ class VideoSFM:
         :param pose2: Position and orientation with respect to camera
         :return: Triangulated 3D points
         """
-        pass
+        # Projection Matrices
+        P1 = K @ pose1[:3, :]
+        P2 = K @ pose2[:3, :]
+
+        # Triangulate
+        pts1_h = cv2.undistortPoints(pts1.reshape(-1, 1, 2), K, None)
+        pts2_h = cv2.undistortPoints(pts2.reshape(-1, 1, 2), K, None)
+
+        points_4d = cv2.triangulatePoints(P1, P2, pts1_h, pts2_h)  # Quaternions
+        points_3d = points_4d[:3] / points_4d[3]
+
+        # Filter outliers based on reprojection error and depth
+        mask = self._filter_triangulated_points(points_3d.T, pts1, pts2, P1, P2)
+        return points_3d.T[mask] if mask.any() else None
 
     def _filter_triangulated_points(
         self,
@@ -135,4 +148,52 @@ class VideoSFM:
         :param max_depth: Max threshold for depth - Needs to be configurable
         :return:
         """
-        pass
+        # Check depths
+        depths1 = (
+            P1[2:3] @ np.hstack([points_3d, np.ones((len(points_3d), 1))]).T
+        ).flatten()
+        depths2 = (
+            P2[2:3] @ np.hstack([points_3d, np.ones((len(points_3d), 1))]).T
+        ).flatten()
+
+        depth_mask = (
+            (depths1 > min_depth)
+            & (depths1 < max_depth)
+            & (depths2 > min_depth)
+            & (depths2 < max_depth)
+        )
+
+        # Reprojection errors
+        points_h = np.hstack([points_3d, np.ones((len(points_3d), 1))])
+
+        proj1 = (P1 @ points_h.T).T
+        proj1 = proj1[:, :2] / proj1[:, 2:3]
+
+        proj2 = (P2 @ points_h.T).T
+        proj2 = proj2[:, :2] / proj2[:, 2:3]
+
+        errors1 = np.linalg.norm(proj1 - pts1, axis=1)
+        errors2 = np.linalg.norm(proj2 - pts2, axis=1)
+
+        error_mask = (errors1 < max_reproj_error) & (errors2 < max_reproj_error)
+        return depth_mask & error_mask
+
+    def _extract_point_colors(self, frame, pts):
+        """
+        Extracts RGB colors at locations
+        :param frame: Frame to get colors from
+        :param pts: Points on the frame
+        :return: Colors matrix
+        """
+
+        colors = []
+        h, w = frame.shape[:2]
+        for pt in pts:
+            x, y = int(pt[0]), int(pt[1])
+            if 0 <= x < w and 0 <= y < h:
+                color = frame[y, x] / 255.0  # Normalize
+                colors.append(color)
+            else:
+                log(WARNING, "Error in extracting colors")
+                colors.append([0.5, 0.5, 0.5])  # Default gray
+        return colors
