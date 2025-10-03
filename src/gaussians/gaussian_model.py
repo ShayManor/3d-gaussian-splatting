@@ -29,7 +29,7 @@ class GaussianModel(nn.Module):
         self.opacity = nn.Parameter(torch.zeros(n_gaussians, 1, device=device))
 
         self.xyz_gradient_accum = torch.zeros_like(self.xyz)
-        self.xyz_gradient_counts = torch.zeros(n_gaussians, 1, device=device)
+        self.xyz_gradient_count = torch.zeros(n_gaussians, 1, device=device)
         self.max_radii_2D = torch.zeros(n_gaussians, device=device)
 
         # Initialize quaternions
@@ -71,7 +71,7 @@ class GaussianModel(nn.Module):
         Densifies and prunes low-opacity gaussians
         """
         with torch.no_grad():
-            grads = self.xyz_gradient_accum / (self.xyz_gradient_counts + 1e-8)
+            grads = self.xyz_gradient_accum / (self.xyz_gradient_count + 1e-8)
             grads_norm = torch.norm(grads, dim=-1)
 
             # Clone small gaussians with high gradients
@@ -98,7 +98,7 @@ class GaussianModel(nn.Module):
                 self._prune_gaussians(~prune_mask)  # not operator because prune removes
 
             # Reset gradients
-            self.xyz_gradient_counts.zero_()
+            self.xyz_gradient_count.zero_()
             self.xyz_gradient_accum.zero_()
 
     def _clone_gaussians(self, mask):
@@ -158,7 +158,7 @@ class GaussianModel(nn.Module):
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[keep_mask]
         self.xyz_gradient_count = self.xyz_gradient_count[keep_mask]
-        self.max_radii2D = self.max_radii2D[keep_mask]
+        self.max_radii_2D = self.max_radii_2D[keep_mask]
 
     def densify(self, new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation):
         """
@@ -180,8 +180,8 @@ class GaussianModel(nn.Module):
             torch.zeros(n_new, 3, device=device)
         ])
 
-        self.xyz_gradient_counts = torch.cat([
-            self.xyz_gradient_counts,
+        self.xyz_gradient_count = torch.cat([
+            self.xyz_gradient_count,
             torch.zeros(n_new, 1, device=device)
         ])
         self.max_radii_2D = torch.cat([

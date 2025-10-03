@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 from lightglue import SuperPoint, LightGlue
 
@@ -24,3 +25,15 @@ class VideoSFM:
         """
         poses = [np.identity(4)]
         K = self.calibrator.identify_intrinsics(frames, video_path)
+
+    def estimate_pose_from_matches(self, pts1, pts2, K):
+        """
+        Estimate the relative pose from the points
+        :return: Essential (3x3) matrix, mask for inline/outline
+        """
+        E, mask = cv2.findEssentialMat(pts1, pts2, K, method=cv2.RANSAC, prob=0.999, threshold=1.0)
+        if E is None:
+            return None, None
+
+        _, R, t, _ = cv2.recoverPose(E, pts1, pts2, K, mask=mask)
+        return R, t
