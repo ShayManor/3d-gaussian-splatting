@@ -131,6 +131,7 @@ class GSplatBackend:
             viewpoint: Dict,
             bg_color: torch.Tensor = None,
             render_mode: str = "RGB+ED",
+            device: str = 'cuda'
     ) -> Dict:
         """
         Render with explicit depth output
@@ -143,7 +144,7 @@ class GSplatBackend:
         """
 
         if bg_color is None:
-            bg_color = torch.zeros(3, device='cuda')
+            bg_color = torch.zeros(3, device=device)
 
         # Extract parameters (same as render_single)
         means3D = gaussian_params['means3D']

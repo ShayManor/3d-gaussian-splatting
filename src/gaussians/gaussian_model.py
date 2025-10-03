@@ -9,28 +9,28 @@ class GaussianModel(nn.Module):
     Initializes each gaussian as a quaternion
     """
 
-    def __init__(self, n_gaussians: int = 1e5, device_s: str = "cuda"):
+    def __init__(self, n_gaussians: int = 1e5, device: str = "cuda"):
         super().__init__()
 
-        device = torch.device(device_s)
+        device_c = torch.device(device)
 
         # Params - using half precision when possible
-        self.xyz = nn.Parameter(torch.randn(n_gaussians, 3, device=device) * 10)
-        self.features_dc = nn.Parameter(torch.zeros(n_gaussians, 1, 3, device=device))
+        self.xyz = nn.Parameter(torch.randn(n_gaussians, 3, device=device_c) * 10)
+        self.features_dc = nn.Parameter(torch.zeros(n_gaussians, 1, 3, device=device_c))
         self.features_rest = nn.Parameter(
-            torch.zeros(n_gaussians, 15, 3, device=device)
+            torch.zeros(n_gaussians, 15, 3, device=device_c)
         )
         self.scaling = nn.Parameter(
-            torch.ones(n_gaussians, 3, device=device) * -3
+            torch.ones(n_gaussians, 3, device=device_c) * -3
         )  # log scale
         self.rotation = nn.Parameter(
-            torch.zeros(n_gaussians, 4, device=device)
+            torch.zeros(n_gaussians, 4, device=device_c)
         )  # quaternions
-        self.opacity = nn.Parameter(torch.zeros(n_gaussians, 1, device=device))
+        self.opacity = nn.Parameter(torch.zeros(n_gaussians, 1, device=device_c))
 
         self.xyz_gradient_accum = torch.zeros_like(self.xyz)
-        self.xyz_gradient_count = torch.zeros(n_gaussians, 1, device=device)
-        self.max_radii_2D = torch.zeros(n_gaussians, device=device)
+        self.xyz_gradient_count = torch.zeros(n_gaussians, 1, device=device_c)
+        self.max_radii_2D = torch.zeros(n_gaussians, device=device_c)
 
         # Initialize quaternions
         with torch.no_grad():

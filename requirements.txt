@@ -7,3 +7,4 @@ kornia~=0.8.1
 torch~=2.8.0
 fast_gauss~=0.0.9
 gsplat
+scikit-learn
