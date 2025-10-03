@@ -101,6 +101,15 @@ class VideoSFM:
         return R, t
 
     def triangulate_points(self, pts1, pts2, K, pose1, pose2):
+        """
+        Triangulates 3D points from the given 2D points
+        :param pts1: First 2d point
+        :param pts2: Second 2d point
+        :param K: Camera intrinsics
+        :param pose1: Position and orientation with respect to camera
+        :param pose2: Position and orientation with respect to camera
+        :return: Triangulated 3D points
+        """
         pass
 
     def _filter_triangulated_points(
@@ -110,8 +119,20 @@ class VideoSFM:
         pts2,
         P1,
         P2,
-        max_reproj_error=5.0,
-        min_depth=0.1,
-        max_depth=100.0,
+        max_reproj_error=5.0,  # Unsure of this value
+        min_depth=0.1,  # Unsure of this value
+        max_depth=100.0,  # Unsure of this value
     ):
+        """
+        Filters the 3D points based on reprojection error and depth
+        :param points_3d: 3D points
+        :param pts1: First 2D point
+        :param pts2: Second 2D point
+        :param P1: Projection 1
+        :param P2: Projection 2
+        :param max_reproj_error: Threshold for reproj error - Needs to be configurable
+        :param min_depth: Minimum threshold for depth - Needs to be configurable
+        :param max_depth: Max threshold for depth - Needs to be configurable
+        :return:
+        """
         pass
