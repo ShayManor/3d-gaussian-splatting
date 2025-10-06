@@ -4,6 +4,7 @@ from logging import log, INFO
 from src.gaussians.gaussian_model import GaussianModel
 from src.gaussians.training_config import TrainingConfig
 from src.training.multi_video_processor import MultiVideoProcessor
+from src.training.trainer import GaussianTrainer
 
 
 def main():
@@ -36,10 +37,13 @@ def main():
     config.iterations_per_video = args.iterations
 
     print("Starting training...")
-    trainer = GaussianModel(config.initial_gaussians, device=args.device)
+    trainer = GaussianTrainer(config, device=args.device)
     gaussians = trainer.train(merged_data, args.output)
 
+    print("\n" + "=" * 60)
     print(f"Training complete! Model saved to {args.output}")
+    print("=" * 60)
+
 
 if __name__ == "__main__":
     main()
