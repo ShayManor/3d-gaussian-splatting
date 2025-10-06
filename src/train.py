@@ -15,8 +15,15 @@ def main():
     parser.add_argument('--stride', type=int, default=10, help='Frame sampling stride')
     parser.add_argument('--device', type=str, default='cuda', help='Device to use')
     parser.add_argument('--iterations', type=int, default=30000, help='Training iterations')
+    parser.add_argument('--distributed', type=bool, default=False, help='Distributed training among multiple GPUs')
 
     args = parser.parse_args()
+
+    config = TrainingConfig()
+    config.iterations_per_video = args.iterations
+    config.frame_stride = args.stride
+    config.cache_dir = args.cache_dir
+    config.distributed = args.distributed
 
     log(INFO, "Processing videos...")
     processor = MultiVideoProcessor(
@@ -32,11 +39,8 @@ def main():
 
     print(f"Processed {len(args.videos)} videos")
     print(f"Total 3D points: {len(merged_data['points_3d'])}")
-
-    config = TrainingConfig()
-    config.iterations_per_video = args.iterations
-
     print("Starting training...")
+
     trainer = GaussianTrainer(config, device=args.device)
     gaussians = trainer.train(merged_data, args.output)
 
