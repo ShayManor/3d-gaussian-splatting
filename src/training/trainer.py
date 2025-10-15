@@ -1,13 +1,20 @@
-from logging import log, WARNING
+from logging import log, WARNING, INFO
 from pathlib import Path
 
+import cv2
+import numpy as np
 import torch
 from torch import GradScaler
+from torch.optim import Adam
 from tqdm import tqdm
 
 from src.gaussians.gaussian_model import GaussianModel
 from src.gaussians.gaussian_rasterizer import GaussianRasterizer
 from src.gaussians.training_config import TrainingConfig
+from src.video.video_loader import VideoLoader
+
+from sklearn.neighbors import NearestNeighbors
+from torch.nn import functional as F
 
 
 class GaussianTrainer:
@@ -41,15 +48,10 @@ class GaussianTrainer:
 
         # Setup rasterizer with first camera's intrinsics
         K = torch.tensor(
-            merged_data['all_intrinsics'][0],
-            device=self.device,
-            dtype=torch.float32
+            merged_data["all_intrinsics"][0], device=self.device, dtype=torch.float32
         )
         rasterizer = GaussianRasterizer(
-            K=K,
-            device=str(self.device),
-            enable_caching=True,
-            backend="gsplat"
+            K=K, device=str(self.device), enable_caching=True, backend="gsplat"
         )
         train_loader = self._create_data_loader(merged_data)
 
@@ -67,33 +69,31 @@ class GaussianTrainer:
         :param merged_data: Point cloud
         :return: Gaussians
         """
-        points_3d = merged_data['points_3d']
-        colors = merged_data['colors']
+        points_3d = merged_data["points_3d"]
+        colors = merged_data["colors"]
         n = len(points_3d)
 
         if n == 0:
             log(WARNING, "No 3D points found! Initializing random gaussians")
             return GaussianModel(
-                n_gaussians=int(self.config.initial_gaussians),
-                device=str(self.device)
+                n_gaussians=int(self.config.initial_gaussians), device=str(self.device)
             )
 
         # Calculate initial number of Gaussians
         n_gaussians = min(
             max(n * 3, int(self.config.initial_gaussians)),  # tt least 3x points
-            int(self.config.max_gaussians // 2)  # Leave room for densification
+            int(self.config.max_gaussians // 2),  # Leave room for densification
         )
 
         print(f"Creating {n_gaussians:,} initial Gaussians from {n:,} 3D points")
 
-        gaussians = GaussianModel(
-            n_gaussians=n_gaussians,
-            device=str(self.device)
-        )
+        gaussians = GaussianModel(n_gaussians=n_gaussians, device=str(self.device))
 
         with torch.no_grad():
             # convert to tensor
-            points_tensor = torch.tensor(points_3d, device=self.device, dtype=torch.float32)
+            points_tensor = torch.tensor(
+                points_3d, device=self.device, dtype=torch.float32
+            )
 
             if n_gaussians <= n:
                 # subsample points
@@ -103,11 +103,16 @@ class GaussianTrainer:
                 indices = torch.randint(0, n, (n_gaussians,))
 
             # set positions with small random offset
-            gaussians.xyz.data = points_tensor[indices] + torch.randn(n_gaussians, 3, device=self.device) * 0.001
+            gaussians.xyz.data = (
+                points_tensor[indices]
+                + torch.randn(n_gaussians, 3, device=self.device) * 0.001
+            )
 
             # Initialize colors if available
             if len(colors) > 0:
-                colors_tensor = torch.tensor(colors, device=self.device, dtype=torch.float32)
+                colors_tensor = torch.tensor(
+                    colors, device=self.device, dtype=torch.float32
+                )
                 gaussians.features_dc.data[:, 0, :] = colors_tensor[indices]
 
             # Smart scale initialization based on nearest neighbors
@@ -124,10 +129,185 @@ class GaussianTrainer:
         """
         Initialize scales based on local point density
         """
+        positions = gaussians.xyz.data.cpu().numpy()
+        all_points = points.cpu().numpy()
 
+        nbrs = NearestNeighbors(
+            n_neighbors=min(7, len(all_points)), algorithm="kd_tree"
+        )
+        nbrs.fit(all_points)
+        distances, _ = nbrs.kneighbors(positions)
+
+        # Average distance as scale
+        avg_distances = (
+            distances[:, 1:].mean(axis=1) if distances.shape[1] > 1 else distances[:, 0]
+        )
+
+        scales = torch.tensor(avg_distances, device=self.device, dtype=torch.float32)
+        scales = scales.clamp(min=1e-7)
+        scales = torch.log(scales.unsqueeze(1).expand(-1, 3))
+
+        gaussians.scaling.data = scales
 
     def _setup_optimizer(self, gaussians):
-        pass
+        params = [
+            {
+                "params": [gaussians.xyz],
+                "lr": self.config.position_lr_init,
+                "name": "xyz",
+            },
+            {"params": [gaussians.features_dc], "lr": 0.0025, "name": "f_dc"},
+            {
+                "params": [gaussians.features_rest],
+                "lr": 0.0025 / 20.0,
+                "name": "f_rest",
+            },
+            {"params": [gaussians.opacity], "lr": 0.05, "name": "opacity"},
+            {"params": [gaussians.scaling], "lr": 0.005, "name": "scaling"},
+            {"params": [gaussians.rotation], "lr": 0.001, "name": "rotation"},
+        ]
+        return Adam(params, lr=0.0, eps=1e-15)
 
     def _create_data_loader(self, merged_data):
+        """
+        Efficient data loader
+        """
+        all_views = []
+        for i, video_info in enumerate(merged_data["video_info"]):
+            video_path = video_info["path"]
+            poses = merged_data["all_poses"][i]
+            K = merged_data["all_intrinsics"][i]
+
+            loader = VideoLoader(video_path, cache_frames=False)
+            width = int(loader.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(loader.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+            # Sample frames with stride
+            total_frames = min(loader.total_frames, len(poses))
+            frame_indices = list(range(0, total_frames, self.config.frame_stride))
+
+            for j, frame_idx in enumerate(frame_indices[: len(poses)]):
+                all_views.append(
+                    {
+                        "video_path": video_path,
+                        "frame_idx": frame_idx,
+                        "pose": poses[j],
+                        "K": K,
+                        "width": width,
+                        "height": height,
+                    }
+                )
+
+        log(INFO, f"Total training views: {len(all_views)}")
+
+        def batch_generator():
+            loaders = {}
+            while True:
+                # random sample
+                indices = np.random.choice(
+                    len(all_views), self.config.batch_size, replace=True
+                )
+                batch = []
+
+                for idx in indices:
+                    view = all_views[idx]
+                    # get or create loader
+                    if view["video_path"] not in loaders:
+                        loaders[view["video_path"]] = VideoLoader(
+                            view["video_path"], cache_frames=False
+                        )
+
+                    frame = loaders[view["video_path"]].get_frame(view["frame_idx"])
+                    if frame is not None:
+                        batch.append(
+                            {
+                                "image": torch.tensor(
+                                    frame / 255.0,
+                                    device=self.device,
+                                    dtype=torch.float32,
+                                ),
+                                "pose": torch.tensor(
+                                    view["pose"],
+                                    device=self.device,
+                                    dtype=torch.float32,
+                                ),
+                                "K": torch.tensor(
+                                    view["K"], device=self.device, dtype=torch.float32
+                                ),
+                                "width": view["width"],
+                                "height": view["height"],
+                            }
+                        )
+
+                if batch:
+                    yield batch
+
+        return batch_generator()
+
+    def _get_projection_matrix(
+        self, K: torch.Tensor, width: int, height: int
+    ) -> torch.Tensor:
+        """
+        Simple projection matrix from intrinsics
+        """
+        znear, zfar = 0.01, 100.0
+
+        P = torch.zeros(4, 4, device=self.device)
+        P[0, 0] = 2 * K[0, 0] / width
+        P[1, 1] = 2 * K[1, 1] / height
+        P[0, 2] = 2 * K[0, 2] / width - 1
+        P[1, 2] = 2 * K[1, 2] / height - 1
+        P[2, 2] = zfar / (zfar - znear)
+        P[2, 3] = -(zfar * znear) / (zfar - znear)
+        P[3, 2] = 1
+
+        return P
+
+    def _compute_ssim(self, img1: torch.Tensor, img2: torch.Tensor) -> torch.Tensor:
+        """
+        Simple SSIM computation
+        """
+        C1, C2 = 0.01**2, 0.03**2
+
+        mu1 = F.avg_pool2d(img1, 3, 1, padding=1)
+        mu2 = F.avg_pool2d(img2, 3, 1, padding=1)
+
+        mu1_sq = mu1.pow(2)
+        mu2_sq = mu2.pow(2)
+        mu1_mu2 = mu1 * mu2
+
+        sigma1_sq = F.avg_pool2d(img1 * img1, 3, 1, padding=1) - mu1_sq
+        sigma2_sq = F.avg_pool2d(img2 * img2, 3, 1, padding=1) - mu2_sq
+        sigma12 = F.avg_pool2d(img1 * img2, 3, 1, padding=1) - mu1_mu2
+
+        ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / (
+            (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+        )
+
+        return ssim_map.mean()
+
+    def _update_learning_rate(self, optimizer: Adam):
+        """
+        Update learning rate schedule
+        """
+        progress = min(self.iteration / self.config.position_lr_max_steps, 1.0)
+        lr = self.config.position_lr_init * \
+             (self.config.position_lr_final / self.config.position_lr_init) ** progress
+
+        for group in optimizer.param_groups:
+            if group.get("name") == "xyz":
+                group['lr'] = lr
+
+    def _save_checkpoint(self, gaussians: GaussianModel, optimizer: Adam, output_path: Path):
+        """
+        Save training checkpoint
+        """
+        torch.save({
+            'iteration': self.iteration,
+            'model_state': gaussians.state_dict(),
+            'optimizer_state': optimizer.state_dict(),
+            'n_gaussians': gaussians.xyz.shape[0]
+        }, output_path / f"checkpoint_{self.iteration}.pth")
+
+    def _training_step(self):
         pass
