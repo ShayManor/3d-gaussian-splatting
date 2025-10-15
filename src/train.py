@@ -1,7 +1,6 @@
 import argparse
 from logging import log, INFO
 
-from src.gaussians.gaussian_model import GaussianModel
 from src.gaussians.training_config import TrainingConfig
 from src.training.multi_video_processor import MultiVideoProcessor
 from src.training.trainer import GaussianTrainer
@@ -16,6 +15,7 @@ def main():
     parser.add_argument('--device', type=str, default='cuda', help='Device to use')
     parser.add_argument('--iterations', type=int, default=30000, help='Training iterations')
     parser.add_argument('--distributed', type=bool, default=False, help='Distributed training among multiple GPUs')
+    parser.add_argument('--batch_size', type=int, default=4, help='Batch size for training')
 
     args = parser.parse_args()
 
@@ -24,6 +24,7 @@ def main():
     config.frame_stride = args.stride
     config.cache_dir = args.cache_dir
     config.distributed = args.distributed
+    config.batch_size = args.batch_size
 
     log(INFO, "Processing videos...")
     processor = MultiVideoProcessor(

@@ -28,41 +28,6 @@ class GaussianTrainer:
         self.iteration = 0
         self.loss_history = []
 
-    def train(self, merged_data, output_dir) -> GaussianModel:
-        """
-        Main training loop
-        :param merged_data: Dict with total data
-        :param output_dir: output location for model
-        :return: GaussianModel: trained model
-        """
-
-        output_path = Path(output_dir)
-        output_path.mkdir(exist_ok=True, parents=True)
-
-        print(f"Initializing with {len(merged_data['points_3d'])} 3D points")
-
-        # initialize gaussians from point cloud
-        gaussians = self._initialize_gaussians(merged_data)
-        print(f"Initialized {gaussians.xyz.shape[0]} Gaussians")
-
-        optimizer = self._setup_optimizer(gaussians)
-
-        # Setup rasterizer with first camera's intrinsics
-        K = torch.tensor(
-            merged_data["all_intrinsics"][0], device=self.device, dtype=torch.float32
-        )
-        rasterizer = GaussianRasterizer(
-            K=K, device=str(self.device), enable_caching=True, backend="gsplat"
-        )
-        train_loader = self._create_data_loader(merged_data)
-
-        # training loop
-        progress = tqdm(total=int(self.config.iterations_per_video), desc="Training")
-
-        while self.iteration < self.config.iterations_per_video:
-            self.iteration += 1
-
-        return GaussianModel()
 
     def _initialize_gaussians(self, merged_data):
         """
@@ -337,7 +302,7 @@ class GaussianTrainer:
             "shs": gaussians.get_features,
         }
 
-        total_loss = 0
+        total_loss = torch.tensor(0.0, device=self.device)
 
         for view_data in batch:
             # Create viewpoint
@@ -351,7 +316,7 @@ class GaussianTrainer:
             }
 
             # Render with backend
-            with autocast(enabled=self.config.use_mixed_precision):
+            with autocast(enabled=self.config.use_mixed_precision, device_type=self.device):
                 rendered = rasterizer.backend.render_with_depth(
                     gaussian_params,
                     viewpoint,
@@ -387,3 +352,85 @@ class GaussianTrainer:
             optimizer.step()
 
         return total_loss.item()
+
+    def train(self, merged_data, output_dir) -> GaussianModel:
+        """
+        Main training loop
+        :param merged_data: Dict with total data
+        :param output_dir: output location for model
+        :return: GaussianModel: trained model
+        """
+
+        output_path = Path(output_dir)
+        output_path.mkdir(exist_ok=True, parents=True)
+
+        print(f"Initializing with {len(merged_data['points_3d'])} 3D points")
+
+        # initialize gaussians from point cloud
+        gaussians = self._initialize_gaussians(merged_data)
+        print(f"Initialized {gaussians.xyz.shape[0]} Gaussians")
+
+        optimizer = self._setup_optimizer(gaussians)
+
+        # Setup rasterizer with first camera's intrinsics
+        K = torch.tensor(
+            merged_data["all_intrinsics"][0], device=self.device, dtype=torch.float32
+        )
+        rasterizer = GaussianRasterizer(
+            K=K, device=str(self.device), enable_caching=True, backend="gsplat"
+        )
+        train_loader = self._create_data_loader(merged_data)
+
+        # training loop
+        progress = tqdm(total=int(self.config.iterations_per_video), desc="Training")
+
+        while self.iteration < self.config.iterations_per_video:
+            batch = next(train_loader)
+
+            # compute loss and backward
+            loss = self._training_step(gaussians, rasterizer, batch, optimizer)
+
+            # Accumulate gradients for densification
+            with torch.no_grad():
+                if gaussians.xyz.grad is not None:
+                    gaussians.xyz_gradient_accum += gaussians.xyz.grad.data
+                    gaussians.xyz_gradient_count += 1
+
+            if self.iteration > 500 and self.iteration % self.config.densify_interval == 0:
+                gaussians.densify_and_prune(
+                    grads_threshold=0.0002,
+                    min_opacity=0.005,
+                    extent=4.0,
+                    max_screen_size=20.0
+                )
+
+                optimizer = self._setup_optimizer(gaussians)
+
+            # Reset opacity periodically
+            if self.iteration % self.config.opacity_reset_interval == 0:
+                with torch.no_grad():
+                    mask = gaussians.get_opacity < 0.01
+                    gaussians.opacity.data[mask] = torch.logit(
+                        torch.ones_like(gaussians.opacity.data[mask]) * 0.01
+                    )
+
+            self._update_learning_rate(optimizer)
+
+            if self.iteration % 10 == 0:
+                progress.set_postfix({
+                    'loss': f"{loss:.4f}",
+                    'n_gauss': f"{gaussians.xyz.shape[0]:,}"
+                })
+
+                # Checkpoint
+            if self.iteration % 1000 == 0:
+                self._save_checkpoint(gaussians, optimizer, output_path)
+
+            self.iteration += 1
+            progress.update(1)
+
+        progress.close()
+        torch.save(gaussians.state_dict(), output_path / "final_model.pth")
+        print(f"\nTraining complete! Model saved to {output_path}")
+
+        return gaussians
