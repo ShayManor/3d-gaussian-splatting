@@ -1,3 +1,4 @@
+from logging import log, WARNING
 from pathlib import Path
 
 import torch
@@ -61,7 +62,69 @@ class GaussianTrainer:
         return GaussianModel()
 
     def _initialize_gaussians(self, merged_data):
-        pass
+        """
+        Initialize Gaussians from SFM point cloud
+        :param merged_data: Point cloud
+        :return: Gaussians
+        """
+        points_3d = merged_data['points_3d']
+        colors = merged_data['colors']
+        n = len(points_3d)
+
+        if n == 0:
+            log(WARNING, "No 3D points found! Initializing random gaussians")
+            return GaussianModel(
+                n_gaussians=int(self.config.initial_gaussians),
+                device=str(self.device)
+            )
+
+        # Calculate initial number of Gaussians
+        n_gaussians = min(
+            max(n * 3, int(self.config.initial_gaussians)),  # tt least 3x points
+            int(self.config.max_gaussians // 2)  # Leave room for densification
+        )
+
+        print(f"Creating {n_gaussians:,} initial Gaussians from {n:,} 3D points")
+
+        gaussians = GaussianModel(
+            n_gaussians=n_gaussians,
+            device=str(self.device)
+        )
+
+        with torch.no_grad():
+            # convert to tensor
+            points_tensor = torch.tensor(points_3d, device=self.device, dtype=torch.float32)
+
+            if n_gaussians <= n:
+                # subsample points
+                indices = torch.randperm(n)[:n_gaussians]
+            else:
+                # duplicate points with noise
+                indices = torch.randint(0, n, (n_gaussians,))
+
+            # set positions with small random offset
+            gaussians.xyz.data = points_tensor[indices] + torch.randn(n_gaussians, 3, device=self.device) * 0.001
+
+            # Initialize colors if available
+            if len(colors) > 0:
+                colors_tensor = torch.tensor(colors, device=self.device, dtype=torch.float32)
+                gaussians.features_dc.data[:, 0, :] = colors_tensor[indices]
+
+            # Smart scale initialization based on nearest neighbors
+            self._initialize_scales_smart(gaussians, points_tensor)
+
+            # Initialize opacity to be slightly visible
+            gaussians.opacity.data = torch.logit(
+                torch.ones(n_gaussians, 1, device=self.device) * 0.1
+            )
+
+        return gaussians
+
+    def _initialize_scales_smart(self, gaussians, points):
+        """
+        Initialize scales based on local point density
+        """
+
 
     def _setup_optimizer(self, gaussians):
         pass
