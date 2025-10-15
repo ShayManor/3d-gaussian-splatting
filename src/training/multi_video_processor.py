@@ -42,7 +42,7 @@ class MultiVideoProcessor:
 
         for video_path in tqdm(video_paths, desc="Processing videos"):
             video_cache = self.cache_dir / f"{Path(video_path).stem}_sfm.pkl"
-            if use_cache and self.cache_dir.exists():
+            if use_cache and video_cache.exists():
                 log(INFO, f"Using cached SFM from {self.cache_dir}")
                 with open(video_cache, "rb") as f:
                     video_data = pickle.load(f)
