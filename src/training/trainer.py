@@ -1,10 +1,11 @@
 from logging import log, WARNING, INFO
 from pathlib import Path
+from typing import List, Dict
 
 import cv2
 import numpy as np
 import torch
-from torch import GradScaler
+from torch import GradScaler, autocast
 from torch.optim import Adam
 from tqdm import tqdm
 
@@ -291,23 +292,98 @@ class GaussianTrainer:
         Update learning rate schedule
         """
         progress = min(self.iteration / self.config.position_lr_max_steps, 1.0)
-        lr = self.config.position_lr_init * \
-             (self.config.position_lr_final / self.config.position_lr_init) ** progress
+        lr = (
+            self.config.position_lr_init
+            * (self.config.position_lr_final / self.config.position_lr_init) ** progress
+        )
 
         for group in optimizer.param_groups:
             if group.get("name") == "xyz":
-                group['lr'] = lr
+                group["lr"] = lr
 
-    def _save_checkpoint(self, gaussians: GaussianModel, optimizer: Adam, output_path: Path):
+    def _save_checkpoint(
+        self, gaussians: GaussianModel, optimizer: Adam, output_path: Path
+    ):
         """
         Save training checkpoint
         """
-        torch.save({
-            'iteration': self.iteration,
-            'model_state': gaussians.state_dict(),
-            'optimizer_state': optimizer.state_dict(),
-            'n_gaussians': gaussians.xyz.shape[0]
-        }, output_path / f"checkpoint_{self.iteration}.pth")
+        torch.save(
+            {
+                "iteration": self.iteration,
+                "model_state": gaussians.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+                "n_gaussians": gaussians.xyz.shape[0],
+            },
+            output_path / f"checkpoint_{self.iteration}.pth",
+        )
 
-    def _training_step(self):
-        pass
+    def _training_step(
+        self,
+        gaussians: GaussianModel,
+        rasterizer: GaussianRasterizer,
+        batch: List[Dict],
+        optimizer: Adam,
+    ) -> float:
+        """
+        Single training step. Returns loss
+        """
+        optimizer.zero_grad()
+
+        gaussian_params = {
+            "means3D": gaussians.get_xyz,
+            "scales": gaussians.get_scaling,
+            "rotations": gaussians.get_rotation,
+            "opacities": gaussians.get_opacity,
+            "shs": gaussians.get_features,
+        }
+
+        total_loss = 0
+
+        for view_data in batch:
+            # Create viewpoint
+            viewpoint = {
+                "world_view_transform": torch.inverse(view_data["pose"]),
+                "projection_matrix": self._get_projection_matrix(
+                    view_data["K"], view_data["width"], view_data["height"]
+                ),
+                "image_width": view_data["width"],
+                "image_height": view_data["height"],
+            }
+
+            # Render with backend
+            with autocast(enabled=self.config.use_mixed_precision):
+                rendered = rasterizer.backend.render_with_depth(
+                    gaussian_params,
+                    viewpoint,
+                    bg_color=torch.ones(3, device=self.device),
+                    render_mode="RGB",
+                    device=str(self.device),
+                )
+
+            rendered_img = rendered["render"]  # [H, W, 3]
+            gt_image = view_data["image"]  # [H, W, 3]
+            # L1 + SSIM loss
+            l1_loss = F.l1_loss(rendered_img, gt_image)
+            ssim_loss = 1.0 - self._compute_ssim(
+                rendered_img.permute(2, 0, 1).unsqueeze(0),
+                gt_image.permute(2, 0, 1).unsqueeze(0),
+            )
+
+            loss = (
+                1.0 - self.config.lambda_dssim
+            ) * l1_loss + self.config.lambda_dssim * ssim_loss
+
+            total_loss += loss
+
+        total_loss = total_loss / len(batch)
+
+        # Backward
+        if self.scaler:
+            self.scaler.scale(total_loss).backward()
+            self.scaler.step(optimizer)
+            self.scaler.update()
+        else:
+            total_loss.backward()
+            optimizer.step()
+
+        return total_loss.item()
