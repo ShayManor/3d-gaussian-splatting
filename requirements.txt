@@ -1,10 +1,10 @@
-scipy
-opencv-python
+scipy==1.15.3
+opencv-python==4.12.0.88
 transformers~=4.56.2
-datasets
+datasets==4.1.1
 https://github.com/cvg/LightGlue.git
 kornia~=0.8.1
 torch~=2.8.0
 fast_gauss~=0.0.9
-gsplat
-scikit-learn
+gsplat==1.5.3
+scikit-learn==1.7.2
