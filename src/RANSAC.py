@@ -112,14 +112,14 @@ def _align_video_to_reference(video_data: Dict, reference: Dict) -> Dict:
         pts2_h = cv2.undistortPoints(pts2.reshape(-1, 1, 2), new_K, None)
 
         # Triangulate in reference space
-        points_4d = cv2.triangulatePoints(P1_ref, P2_ref, pts1_h, pts1_h)
+        points_4d = cv2.triangulatePoints(P1_ref, P2_ref, pts1_h, pts2_h)  # Not sure if pts1_h, pts2_h or both pts1
         points_3d_ref = (points_4d[:3] / points_4d[3]).T
 
         # Triangulate same points in new video space
         P1_new = new_K @ new_pose[:3, :]
         P2_new = new_K @ new_poses[min(new_pose_idx + 1, len(new_poses) - 1)][:3, :]
 
-        points_4d = cv2.triangulatePoints(P1_new, P2_new, pts2_h, pts2_h)
+        points_4d = cv2.triangulatePoints(P1_new, P2_new, pts1_h, pts2_h)
         points_3d_new = (points_4d[:3] / points_4d[3]).T
 
         # Filter outliers based on reasonable depths
