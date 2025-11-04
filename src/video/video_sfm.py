@@ -3,6 +3,7 @@ from logging import log, WARNING, INFO
 import cv2
 import numpy as np
 from lightglue import SuperPoint, LightGlue
+from tqdm import tqdm
 
 from src.video.calibrate import Calibrator
 
@@ -39,7 +40,9 @@ class VideoSFM:
         prev_feats = None
         prev_frame_idx = 0
 
-        for i, frame_idx in enumerate(frame_indices[1:], 1):
+        for i, frame_idx in enumerate(
+            tqdm(frame_indices[1:], total=len(frame_indices) - 1, desc="Processing pairs"), 1
+        ):
             matches = self.calibrator.extract_all_matches(
                 [frames[prev_frame_idx], frames[frame_idx]]
             )
@@ -108,7 +111,7 @@ class VideoSFM:
             return None, None, None
 
         _, R, t, mask_pose = cv2.recoverPose(E, pts1, pts2, K, mask=mask)
-        inliners = (mask_pose.ravel() == 1)
+        inliners = mask_pose.ravel() == 1
         return R, t, inliners
 
     def triangulate_points(self, pts1, pts2, K, pose1, pose2):
@@ -239,7 +242,10 @@ class VideoSFM:
         #     f"  Depth cheirality: {cheirality.sum()}/{len(cheirality)} points have z>0 in both views (z1 range: [{z1min:.2f}, {z1max:.2f}])")
 
         if len(e1) > 0:
-            emin, emax = float(np.min(np.minimum(e1, e2))), float(np.max(np.maximum(e1, e2)))
+            emin, emax = (
+                float(np.min(np.minimum(e1, e2))),
+                float(np.max(np.maximum(e1, e2))),
+            )
         else:
             emin = emax = 0.0
         # log(INFO, f"  Reproj filter: {reproj_ok.sum()}/{len(reproj_ok)} pass (errors range: [{emin:.2f}, {emax:.2f}])")
