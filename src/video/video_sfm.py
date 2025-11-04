@@ -235,17 +235,17 @@ class VideoSFM:
             z1min, z1max = float(np.min(z1)), float(np.max(z1))
         else:
             z1min = z1max = 0.0
-        log(INFO,
-            f"  Depth cheirality: {cheirality.sum()}/{len(cheirality)} points have z>0 in both views (z1 range: [{z1min:.2f}, {z1max:.2f}])")
+        # log(INFO,
+        #     f"  Depth cheirality: {cheirality.sum()}/{len(cheirality)} points have z>0 in both views (z1 range: [{z1min:.2f}, {z1max:.2f}])")
 
         if len(e1) > 0:
             emin, emax = float(np.min(np.minimum(e1, e2))), float(np.max(np.maximum(e1, e2)))
         else:
             emin = emax = 0.0
-        log(INFO, f"  Reproj filter: {reproj_ok.sum()}/{len(reproj_ok)} pass (errors range: [{emin:.2f}, {emax:.2f}])")
+        # log(INFO, f"  Reproj filter: {reproj_ok.sum()}/{len(reproj_ok)} pass (errors range: [{emin:.2f}, {emax:.2f}])")
 
         final_mask = cheirality & reproj_ok
-        log(INFO, f"  Final: {final_mask.sum()}/{len(final_mask)} points pass both filters")
+        # log(INFO, f"  Final: {final_mask.sum()}/{len(final_mask)} points pass both filters")
         return final_mask
 
         # # Check depths
