@@ -3,7 +3,7 @@ import torch
 import numpy as np
 from scipy.optimize import least_squares
 from logging import log, INFO, WARNING
-from torch.nn import functional as F
+from tqdm import tqdm
 
 
 class Calibrator:
@@ -32,19 +32,18 @@ class Calibrator:
                 self.loftr = self.loftr.cuda()
         except ImportError:
             self.matcher_type = "opencv"
-            self.alg = cv2.ORB.create(nfeatures=2000)
+            self.alg = cv2.ORB.create(nfeatures=1000)
             self.matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
 
-    def extract_all_matches(self, frames, stride=1):
+    def extract_all_matches(self, frames):
         """
         Extracts all matches from video on GPU
         :param frames: all video frames
-        :param stride: skip nth frames
         :return: a np array of all matches in the form of (frame_idx1, frame_idx2, pts1, pts2)
         """
         log(INFO, f"Processing {len(frames)} frames")
         all_matches = []
-        for i in range(0, len(frames) - stride, stride):
+        for i in tqdm(range(len(frames) - 1), "Matching frames"):
             if i % 100 == 0:
                 log(INFO, f"Matching frames {i} and {i + 1}")
 
@@ -123,6 +122,48 @@ class Calibrator:
 
         return mkpts0, mkpts1
 
+    # def refine_with_bundle_adjustment(self, matches, K_init):
+    #     """
+    #     Optimizes camera intrinsics and poses
+    #     :param matches: Matches from video
+    #     :param K_init: initial K guess
+    #     :return: final K
+    #     """
+    #     point_3d = None
+    #     observed_2d = None
+    #
+    #     def objective(params):
+    #         """
+    #         Optimizes for focal length, poses, and 3D points
+    #         :param params: focal, poses, points
+    #         :return:
+    #         """
+    #         focal = params[0]
+    #         K = np.array(
+    #             [[focal, 0, K_init[0, 2]], [0, focal, K_init[1, 2]], [0, 0, 1]]
+    #         )
+    #
+    #         errors = []
+    #
+    #         for match in matches:
+    #             # Project from 3d to 2d
+    #             proj = point_3d  # Dummy
+    #             errors.append(proj - observed_2d)
+    #
+    #         return np.concatenate(errors)
+    #
+    #     initial_params = [K_init[0, 0]]
+    #
+    #     # Optimize with least-squares for simplicity
+    #     res = least_squares(
+    #         objective,
+    #         initial_params,
+    #         method="trf",  # Trust Region Reflective - Stable
+    #         verbose=2,
+    #     )
+    #
+    #     focal = res.x[0]
+    #     return np.array([[focal, 0, K_init[0, 2]], [0, focal, K_init[1, 2]], [0, 0, 1]])
     def refine_with_bundle_adjustment(self, matches, K_init):
         """
         Optimizes camera intrinsics and poses
@@ -130,60 +171,118 @@ class Calibrator:
         :param K_init: initial K guess
         :return: final K
         """
-        point_3d = None
-        observed_2d = None
+        # Collect 3D-2D correspondences from matches
+        points_3d_list = []
+        points_2d_view1_list = []
+        points_2d_view2_list = []
+
+        for match in matches[:10]:
+            pts1 = match["pts1"]
+            pts2 = match["pts2"]
+
+            if len(pts1) < 8:
+                continue
+
+            # Estimate relative pose
+            E, mask = cv2.findEssentialMat(pts1, pts2, K_init, method=cv2.RANSAC)
+            if E is None:
+                continue
+
+            _, R, t, mask_pose = cv2.recoverPose(E, pts1, pts2, K_init, mask=mask)
+
+            # Triangulate points
+            P1 = K_init @ np.hstack([np.eye(3), np.zeros((3, 1))])  # Identity pose
+            P2 = K_init @ np.hstack([R, t])  # Relative pose
+
+            pts1_h = cv2.undistortPoints(pts1.reshape(-1, 1, 2), K_init, None)
+            pts2_h = cv2.undistortPoints(pts2.reshape(-1, 1, 2), K_init, None)
+
+            points_4d = cv2.triangulatePoints(P1, P2, pts1_h, pts2_h)
+            points_3d = (points_4d[:3] / points_4d[3]).T
+
+            # Filter valid points
+            valid = (points_3d[:, 2] > 0.1) & (points_3d[:, 2] < 100)
+
+            points_3d_list.append(points_3d[valid])
+            points_2d_view1_list.append(pts1[valid])
+            points_2d_view2_list.append(pts2[valid])
+
+        if len(points_3d_list) == 0:
+            log(WARNING, "No valid 3D points for bundle adjustment")
+            return K_init
+
+        # Flatten lists
+        all_points_3d = np.vstack(points_3d_list)
+        all_points_2d_v1 = np.vstack(points_2d_view1_list)
+        all_points_2d_v2 = np.vstack(points_2d_view2_list)
 
         def objective(params):
             """
-            Optimizes for focal length, poses, and 3D points
-            :param params: focal, poses, points
-            :return:
+            Optimize focal length by minimizing reprojection error
+            :param params: [focal_length, cx_offset, cy_offset]
             """
             focal = params[0]
-            K = np.array(
-                [[focal, 0, K_init[0, 2]], [0, focal, K_init[1, 2]], [0, 0, 1]]
-            )
+            cx = K_init[0, 2] + params[1]
+            cy = K_init[1, 2] + params[2]
+
+            K = np.array([[focal, 0, cx], [0, focal, cy], [0, 0, 1]])
 
             errors = []
+            for i in range(len(points_3d_list)):
+                pts1 = points_2d_view1_list[i]
+                pts2 = points_2d_view2_list[i]
+                pts_3d = points_3d_list[i]
 
-            for match in matches:
-                # Project from 3d to 2d
-                proj = point_3d  # Dummy
-                errors.append(proj - observed_2d)
+                # View 1: Identity pose (world frame)
+                P1 = K @ np.hstack([np.eye(3), np.zeros((3, 1))])
+                # Estimate pose for view 2
+                E, _ = cv2.findEssentialMat(pts1, pts2, K, method=cv2.RANSAC)
+                if E is None:
+                    continue
+                _, R, t, _ = cv2.recoverPose(E, pts1, pts2, K)
+                P2 = K @ np.hstack([R, t])
 
-            return np.concatenate(errors)
+                # Project 3D points to 2D in both views
+                # 3D→2D: p_2d = K @ [R|t] @ [X, Y, Z, 1]^T
+                pts_3d_h = np.hstack([pts_3d, np.ones((len(pts_3d), 1))])  # Homogeneous
 
-        initial_params = [K_init[0, 0]]
+                # View 1 projection
+                proj_v1 = (P1 @ pts_3d_h.T).T  # [N, 3]
+                proj_v1 = proj_v1[:, :2] / proj_v1[:, 2:3]  # Normalize by Z
 
-        # Optimize with least-squares for simplicity
-        res = least_squares(
-            objective,
-            initial_params,
-            method="trf",  # Trust Region Reflective - Stable
-            verbose=2,
+                # View 2 projection
+                proj_v2 = (P2 @ pts_3d_h.T).T
+                proj_v2 = proj_v2[:, :2] / proj_v2[:, 2:3]
+
+                # Reprojection errors
+                error_v1 = np.linalg.norm(proj_v1 - pts1, axis=1)
+                error_v2 = np.linalg.norm(proj_v2 - pts2, axis=1)
+
+                errors.extend(error_v1)
+                errors.extend(error_v2)
+
+            return np.array(errors)
+
+        # Optimize: [focal, cx_offset, cy_offset]
+        initial_params = [K_init[0, 0], 0.0, 0.0]
+
+        result = least_squares(
+            objective, initial_params, method="trf", verbose=1, max_nfev=50, ftol=1e-4
         )
 
-        focal = res.x[0]
-        return np.array([[focal, 0, K_init[0, 2]], [0, focal, K_init[1, 2]], [0, 0, 1]])
+        # Build refined K
+        focal_refined = result.x[0]
+        cx_refined = K_init[0, 2] + result.x[1]
+        cy_refined = K_init[1, 2] + result.x[2]
 
-    # def validate_intrinsics(self, K, matches):
-    #     """
-    #     Validates that intrinsics are accurate and checks error
-    #     :param K: Intrinsics
-    #     :param matches: Matches precomputed
-    #     :return: mean_error
-    #     """
-    #     E = K.T @ F @ K
-    #
-    #     errors = []
-    #     for pt1, pt2 in matches:
-    #         l = E @ np.append(pt1, 1)
-    #
-    #         # Distance from pt2 to line
-    #         err = abs(np.dot(l, np.append(pt2, 1))) / np.linalg.norm(l[:2])
-    #         errors.append(err)
-    #
-    #     return np.mean(errors)  # mean error
+        K_refined = np.array(
+            [[focal_refined, 0, cx_refined], [0, focal_refined, cy_refined], [0, 0, 1]]
+        )
+
+        log(INFO, f"Refined focal: {K_init[0, 0]:.1f} => {focal_refined:.1f}")
+
+        return K_refined
+
     def validate_intrinsics(self, K, matches):
         """
         Validates that intrinsics are accurate and checks error
@@ -194,8 +293,8 @@ class Calibrator:
         errors = []
         sampled_matches = np.random.choice(matches, 5, replace=False)
         for match in sampled_matches:
-            pts1 = match['pts1']
-            pts2 = match['pts2']
+            pts1 = match["pts1"]
+            pts2 = match["pts2"]
 
             if len(pts1) < 8:
                 log(WARNING, "Small points")
@@ -222,10 +321,7 @@ class Calibrator:
                     # Distance from pt2 to line
                     err = abs(np.dot(l, pt2_h)) / (np.linalg.norm(l[:2]) + 1e-8)
                     errors.append(err)
-            print(errors)
-            return np.mean(errors) if errors else float('inf')
-
-
+            return np.mean(errors) if errors else float("inf")
 
     def identify_intrinsics(self, frames, video_path):
         """
@@ -252,12 +348,12 @@ class Calibrator:
 
         print(f"Initial guess: focal={initial_focal:.1f}")
 
-        matches = self.extract_all_matches(frames, 10)
+        matches = self.extract_all_matches(frames)
         print(f"Number of matches: {len(matches)}")
 
         # Refine
-        # K_refined = self.refine_with_bundle_adjustment(matches, K_init)
-        K_refined = K_init
+        K_refined = self.refine_with_bundle_adjustment(matches, K_init)
+        # K_refined = K_init
 
         error = self.validate_intrinsics(K_refined, matches)
 
