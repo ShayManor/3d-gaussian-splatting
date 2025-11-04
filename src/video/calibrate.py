@@ -35,15 +35,16 @@ class Calibrator:
             self.alg = cv2.ORB.create(nfeatures=2000)
             self.matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
 
-    def extract_all_matches(self, frames):
+    def extract_all_matches(self, frames, stride=1):
         """
         Extracts all matches from video on GPU
         :param frames: all video frames
+        :param stride: skip nth frames
         :return: a np array of all matches in the form of (frame_idx1, frame_idx2, pts1, pts2)
         """
         log(INFO, f"Processing {len(frames)} frames")
         all_matches = []
-        for i in range(len(frames) - 1):
+        for i in range(0, len(frames) - stride, stride):
             if i % 100 == 0:
                 log(INFO, f"Matching frames {i} and {i + 1}")
 
@@ -165,6 +166,24 @@ class Calibrator:
         focal = res.x[0]
         return np.array([[focal, 0, K_init[0, 2]], [0, focal, K_init[1, 2]], [0, 0, 1]])
 
+    # def validate_intrinsics(self, K, matches):
+    #     """
+    #     Validates that intrinsics are accurate and checks error
+    #     :param K: Intrinsics
+    #     :param matches: Matches precomputed
+    #     :return: mean_error
+    #     """
+    #     E = K.T @ F @ K
+    #
+    #     errors = []
+    #     for pt1, pt2 in matches:
+    #         l = E @ np.append(pt1, 1)
+    #
+    #         # Distance from pt2 to line
+    #         err = abs(np.dot(l, np.append(pt2, 1))) / np.linalg.norm(l[:2])
+    #         errors.append(err)
+    #
+    #     return np.mean(errors)  # mean error
     def validate_intrinsics(self, K, matches):
         """
         Validates that intrinsics are accurate and checks error
@@ -172,17 +191,41 @@ class Calibrator:
         :param matches: Matches precomputed
         :return: mean_error
         """
-        E = K.T @ F @ K
-
         errors = []
-        for pt1, pt2 in matches:
-            l = E @ np.append(pt1, 1)
+        sampled_matches = np.random.choice(matches, 5, replace=False)
+        for match in sampled_matches:
+            pts1 = match['pts1']
+            pts2 = match['pts2']
 
-            # Distance from pt2 to line
-            err = abs(np.dot(l, np.append(pt2, 1))) / np.linalg.norm(l[:2])
-            errors.append(err)
+            if len(pts1) < 8:
+                log(WARNING, "Small points")
+                continue
 
-        return np.mean(errors)  # mean error
+            # Compute Fundamental matrix from point correspondences
+            F, mask = cv2.findFundamentalMat(pts1, pts2, cv2.FM_RANSAC, 1.0, 0.99)
+
+            if F is None:
+                log(WARNING, "Fundamental Matrix is None")
+                continue
+
+            # Compute Essential matrix
+            E = K.T @ F @ K
+
+            for i in range(len(pts1)):
+                if mask[i]:
+                    pt1_h = np.append(pts1[i], 1)
+                    pt2_h = np.append(pts2[i], 1)
+
+                    # Epipolar line in second image
+                    l = E @ pt1_h
+
+                    # Distance from pt2 to line
+                    err = abs(np.dot(l, pt2_h)) / (np.linalg.norm(l[:2]) + 1e-8)
+                    errors.append(err)
+            print(errors)
+            return np.mean(errors) if errors else float('inf')
+
+
 
     def identify_intrinsics(self, frames, video_path):
         """
@@ -209,11 +252,12 @@ class Calibrator:
 
         print(f"Initial guess: focal={initial_focal:.1f}")
 
-        matches = self.extract_all_matches(frames)
+        matches = self.extract_all_matches(frames, 10)
         print(f"Number of matches: {len(matches)}")
 
         # Refine
-        K_refined = self.refine_with_bundle_adjustment(matches, K_init)
+        # K_refined = self.refine_with_bundle_adjustment(matches, K_init)
+        K_refined = K_init
 
         error = self.validate_intrinsics(K_refined, matches)
 
