@@ -144,9 +144,9 @@ class VideoSFM:
         # Tcw2 = np.linalg.inv(pose2)[:3, :4]  # 3x4
 
         # Relative pose from cam1 to cam2: T21 = Tcw2 * Twc1
-        Twc1 = np.vstack([np.linalg.inv(pose1)[:3, :4], [0, 0, 0, 1]])
-        Twc2 = np.vstack([np.linalg.inv(pose2)[:3, :4], [0, 0, 0, 1]])
-        T21 = np.linalg.inv(Twc1) @ Twc2
+        # Twc1 = np.vstack([np.linalg.inv(pose1)[:3, :4], [0, 0, 0, 1]])
+        # Twc2 = np.vstack([np.linalg.inv(pose2)[:3, :4], [0, 0, 0, 1]])
+        T21 = pose2 @ np.linalg.inv(pose1)  # W2C2 * C2W1
         R = T21[:3, :3]
         t = T21[:3, 3:4]  # column vector
 
