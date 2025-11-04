@@ -1,10 +1,12 @@
 import argparse
+import logging
 from logging import log, INFO
 
 from src.gaussians.training_config import TrainingConfig
 from src.training.multi_video_processor import MultiVideoProcessor
 from src.training.trainer import GaussianTrainer
 
+logging.basicConfig(level=logging.INFO)
 
 def main():
     parser = argparse.ArgumentParser(description='Train 3D Gaussian Splatting from videos')

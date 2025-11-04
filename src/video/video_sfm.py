@@ -78,13 +78,13 @@ class VideoSFM:
 
             prev_frame_idx = frame_idx
 
-            return {
-                "poses": np.array(poses),
-                "intrinsics": K,
-                "points_3d": np.array(points_3d) if points_3d else np.empty((0, 3)),
-                "colors": np.array(point_colors) if point_colors else np.empty((0, 3)),
-                "frame_indices": frame_indices,
-            }
+        return {
+            "poses": np.array(poses),
+            "intrinsics": K,
+            "points_3d": np.array(points_3d) if points_3d else np.empty((0, 3)),
+            "colors": np.array(point_colors) if point_colors else np.empty((0, 3)),
+            "frame_indices": frame_indices,
+        }
 
     def estimate_pose_from_matches(self, pts1, pts2, K):
         """

@@ -3,7 +3,6 @@ import torch
 import numpy as np
 from scipy.optimize import least_squares
 from logging import log, INFO, WARNING
-from tqdm import tqdm
 
 
 class Calibrator:
@@ -41,12 +40,9 @@ class Calibrator:
         :param frames: all video frames
         :return: a np array of all matches in the form of (frame_idx1, frame_idx2, pts1, pts2)
         """
-        log(INFO, f"Processing {len(frames)} frames")
+        # log(INFO, f"Processing {len(frames)} frames")
         all_matches = []
-        for i in tqdm(range(len(frames) - 1), "Matching frames"):
-            if i % 100 == 0:
-                log(INFO, f"Matching frames {i} and {i + 1}")
-
+        for i in range(len(frames) - 1):
             if self.matcher_type == "opencv":
                 gray1 = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY)
                 gray2 = cv2.cvtColor(frames[i + 1], cv2.COLOR_BGR2GRAY)
@@ -122,48 +118,6 @@ class Calibrator:
 
         return mkpts0, mkpts1
 
-    # def refine_with_bundle_adjustment(self, matches, K_init):
-    #     """
-    #     Optimizes camera intrinsics and poses
-    #     :param matches: Matches from video
-    #     :param K_init: initial K guess
-    #     :return: final K
-    #     """
-    #     point_3d = None
-    #     observed_2d = None
-    #
-    #     def objective(params):
-    #         """
-    #         Optimizes for focal length, poses, and 3D points
-    #         :param params: focal, poses, points
-    #         :return:
-    #         """
-    #         focal = params[0]
-    #         K = np.array(
-    #             [[focal, 0, K_init[0, 2]], [0, focal, K_init[1, 2]], [0, 0, 1]]
-    #         )
-    #
-    #         errors = []
-    #
-    #         for match in matches:
-    #             # Project from 3d to 2d
-    #             proj = point_3d  # Dummy
-    #             errors.append(proj - observed_2d)
-    #
-    #         return np.concatenate(errors)
-    #
-    #     initial_params = [K_init[0, 0]]
-    #
-    #     # Optimize with least-squares for simplicity
-    #     res = least_squares(
-    #         objective,
-    #         initial_params,
-    #         method="trf",  # Trust Region Reflective - Stable
-    #         verbose=2,
-    #     )
-    #
-    #     focal = res.x[0]
-    #     return np.array([[focal, 0, K_init[0, 2]], [0, focal, K_init[1, 2]], [0, 0, 1]])
     def refine_with_bundle_adjustment(self, matches, K_init):
         """
         Optimizes camera intrinsics and poses
@@ -175,6 +129,7 @@ class Calibrator:
         points_3d_list = []
         points_2d_view1_list = []
         points_2d_view2_list = []
+        poses = []
 
         for match in matches[:10]:
             pts1 = match["pts1"]
@@ -202,19 +157,15 @@ class Calibrator:
 
             # Filter valid points
             valid = (points_3d[:, 2] > 0.1) & (points_3d[:, 2] < 100)
-
-            points_3d_list.append(points_3d[valid])
-            points_2d_view1_list.append(pts1[valid])
-            points_2d_view2_list.append(pts2[valid])
+            if valid.sum() >= 5:
+                points_3d_list.append(points_3d[valid])
+                points_2d_view1_list.append(pts1[valid])
+                points_2d_view2_list.append(pts2[valid])
+                poses.append((np.eye(3, 4), np.hstack([R, t])))
 
         if len(points_3d_list) == 0:
             log(WARNING, "No valid 3D points for bundle adjustment")
             return K_init
-
-        # Flatten lists
-        all_points_3d = np.vstack(points_3d_list)
-        all_points_2d_v1 = np.vstack(points_2d_view1_list)
-        all_points_2d_v2 = np.vstack(points_2d_view2_list)
 
         def objective(params):
             """
@@ -222,28 +173,24 @@ class Calibrator:
             :param params: [focal_length, cx_offset, cy_offset]
             """
             focal = params[0]
-            cx = K_init[0, 2] + params[1]
-            cy = K_init[1, 2] + params[2]
 
-            K = np.array([[focal, 0, cx], [0, focal, cy], [0, 0, 1]])
+            K = np.array(
+                [[focal, 0, K_init[0, 2]], [0, focal, K_init[1, 2]], [0, 0, 1]]
+            )
 
             errors = []
             for i in range(len(points_3d_list)):
                 pts1 = points_2d_view1_list[i]
                 pts2 = points_2d_view2_list[i]
                 pts_3d = points_3d_list[i]
+                pose1, pose2 = poses[i]
 
                 # View 1: Identity pose (world frame)
-                P1 = K @ np.hstack([np.eye(3), np.zeros((3, 1))])
-                # Estimate pose for view 2
-                E, _ = cv2.findEssentialMat(pts1, pts2, K, method=cv2.RANSAC)
-                if E is None:
-                    continue
-                _, R, t, _ = cv2.recoverPose(E, pts1, pts2, K)
-                P2 = K @ np.hstack([R, t])
+                P1 = K @ pose1
+                P2 = K @ pose2
 
                 # Project 3D points to 2D in both views
-                # 3D→2D: p_2d = K @ [R|t] @ [X, Y, Z, 1]^T
+                # 3D->2D: p_2d = K @ [R|t] @ [X, Y, Z, 1]^T
                 pts_3d_h = np.hstack([pts_3d, np.ones((len(pts_3d), 1))])  # Homogeneous
 
                 # View 1 projection
@@ -261,22 +208,33 @@ class Calibrator:
                 errors.extend(error_v1)
                 errors.extend(error_v2)
 
-            return np.array(errors)
+            return np.array(errors) if len(errors) > 0 else np.array([10000.0])
 
         # Optimize: [focal, cx_offset, cy_offset]
-        initial_params = [K_init[0, 0], 0.0, 0.0]
+        initial_params = [K_init[0, 0]]
 
         result = least_squares(
-            objective, initial_params, method="trf", verbose=1, max_nfev=50, ftol=1e-4
+            objective,
+            initial_params,
+            method="trf",
+            verbose=1,
+            bounds=(
+                [K_init[0, 0] * 0.5],
+                [K_init[0, 0] * 2.0],
+            ),  # Bound focal to within 50% of initial
+            max_nfev=30,
+            ftol=1e-4,
         )
 
         # Build refined K
         focal_refined = result.x[0]
-        cx_refined = K_init[0, 2] + result.x[1]
-        cy_refined = K_init[1, 2] + result.x[2]
 
         K_refined = np.array(
-            [[focal_refined, 0, cx_refined], [0, focal_refined, cy_refined], [0, 0, 1]]
+            [
+                [focal_refined, 0, K_init[0, 2]],
+                [0, focal_refined, K_init[1, 2]],
+                [0, 0, 1],
+            ]
         )
 
         log(INFO, f"Refined focal: {K_init[0, 0]:.1f} => {focal_refined:.1f}")
@@ -307,7 +265,7 @@ class Calibrator:
                 log(WARNING, "Fundamental Matrix is None")
                 continue
 
-            # Compute Essential matrix
+            # Essential matrix
             E = K.T @ F @ K
 
             for i in range(len(pts1)):
@@ -321,7 +279,7 @@ class Calibrator:
                     # Distance from pt2 to line
                     err = abs(np.dot(l, pt2_h)) / (np.linalg.norm(l[:2]) + 1e-8)
                     errors.append(err)
-            return np.mean(errors) if errors else float("inf")
+        return np.mean(errors) if errors else float("inf")
 
     def identify_intrinsics(self, frames, video_path):
         """
@@ -338,7 +296,7 @@ class Calibrator:
         height = capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
 
         # COLMAP initial guess formula - works surprisingly well
-        initial_focal = 1.2 * max(width, height)
+        initial_focal = 1.3 * max(width, height)
 
         # Principle points of camera
         cx, cy = width / 2, height / 2
@@ -346,10 +304,10 @@ class Calibrator:
             [[initial_focal, 0, cx], [0, initial_focal, cy], [0, 0, 1]]
         )  # https://ksimek.github.io/2013/08/13/intrinsic
 
-        print(f"Initial guess: focal={initial_focal:.1f}")
+        log(INFO, f"Initial guess: focal={initial_focal:.1f}")
 
         matches = self.extract_all_matches(frames)
-        print(f"Number of matches: {len(matches)}")
+        log(INFO, f"Number of matches: {len(matches)}")
 
         # Refine
         K_refined = self.refine_with_bundle_adjustment(matches, K_init)
