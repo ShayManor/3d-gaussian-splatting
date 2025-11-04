@@ -90,7 +90,21 @@ class MultiVideoProcessor:
         :return: Merged video features
         """
         if len(video_data_list) == 1:
-            return video_data_list[0]
+            # Single video
+            video = video_data_list[0]
+            return {
+                "points_3d": video["points_3d"],
+                "colors": video["colors"],
+                "all_poses": [video["poses"]],
+                "all_intrinsics": [video["intrinsics"]],
+                "video_info": [
+                    {
+                        "path": video["video_path"],
+                        "fps": video["fps"],
+                        "num_frames": len(video["poses"]),
+                    }
+                ],
+            }
 
         merged = {
             "points_3d": video_data_list[0]["points_3d"],

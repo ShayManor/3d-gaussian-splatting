@@ -69,7 +69,7 @@ class GaussianRasterizer:
         self.preprocessing_executor = ThreadPoolExecutor(max_workers=num_workers)
         self.preprocessing_queue = deque(maxlen=5)
 
-        self.backend = self._initialize_backend(backend)
+        self.backend = self._initialize_backend(backend, self.K)
         self.render_stream = torch.cuda.Stream()
         self.preprocess_stream = torch.cuda.Stream()
 
@@ -77,7 +77,7 @@ class GaussianRasterizer:
             self._project_gaussians, mode="max-autotune"
         )
 
-    def _initialize_backend(self, backend):
+    def _initialize_backend(self, backend, K):
         if backend == "auto":
             backends_to_try = ["gplat", "pytorch"]
         else:
@@ -86,14 +86,14 @@ class GaussianRasterizer:
         for backend_name in backends_to_try:
             try:
                 if backend_name == "gsplat":
-                    from gsplat import rasterization, project_gaussians
+                    from gsplat import rasterization
 
                     log(INFO, "Using gsplat backend (fastest)")
                     return GSplatBackend(K)
 
                 elif backend_name == "pytorch":
                     log(INFO, "Using PyTorch backend (fallback)")
-                    return PyTorchBackend()
+                    return PyTorchBackend(K)
 
             except ImportError:
                 continue
