@@ -296,8 +296,11 @@ class Calibrator:
         height = capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
 
         # COLMAP initial guess formula - works surprisingly well
-        initial_focal = 1.3 * max(width, height)
+        initial_focal = 1.2 * max(width, height)
 
+        # IPhone approximate FOV
+        # fov = 72.0
+        # initial_focal = height / (2 * math.tan(math.radians(fov / 2)))
         # Principle points of camera
         cx, cy = width / 2, height / 2
         K_init = np.array(
@@ -310,8 +313,8 @@ class Calibrator:
         log(INFO, f"Number of matches: {len(matches)}")
 
         # Refine
-        K_refined = self.refine_with_bundle_adjustment(matches, K_init)
-        # K_refined = K_init
+        # K_refined = self.refine_with_bundle_adjustment(matches, K_init)
+        K_refined = K_init
 
         error = self.validate_intrinsics(K_refined, matches)
 
