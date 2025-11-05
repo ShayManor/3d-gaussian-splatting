@@ -47,12 +47,13 @@ def main():
 
     trainer = GaussianTrainer(config, device=args.device)
     gaussians = trainer.train(merged_data, args.output)
-    ply_output = args.output.replace('pth', 'ply')
+    output_model = args.output + '/final_model.pth'
+    ply_output = output_model.replace('pth', 'ply')
     print("\n" + "=" * 60)
-    print(f"Training complete! Model saved to {args.output}, Splat saved to {ply_output}")
+    print(f"Training complete! Model saved to {output_model}, Splat saved to {ply_output}")
     print("=" * 60)
 
-    export(args.output, ply_output)
+    export(output_model, ply_output)
 
 
 if __name__ == "__main__":
