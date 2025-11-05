@@ -99,10 +99,6 @@ class GaussianModel(nn.Module):
             big_points_mask = max_scale > extent / 2
             prune_mask = prune_mask | big_points_mask
 
-
-
-
-
             if prune_mask.sum() > 0:
                 self._prune_gaussians(~prune_mask)  # not operator because prune removes
 

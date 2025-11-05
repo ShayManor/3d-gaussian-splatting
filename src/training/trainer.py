@@ -16,6 +16,7 @@ from src.video.video_loader import VideoLoader
 
 from sklearn.neighbors import NearestNeighbors
 from torch.nn import functional as F
+import matplotlib.pyplot as plt
 
 
 class GaussianTrainer:
@@ -27,6 +28,8 @@ class GaussianTrainer:
 
         self.iteration = 0
         self.loss_history = []
+        self.opacity_history = []
+        self.gaussian_history = []
 
     def _initialize_gaussians(self, merged_data):
         """
@@ -333,8 +336,8 @@ class GaussianTrainer:
             # L1 + SSIM loss
             l1_loss = F.l1_loss(rendered_img, gt_image)
             ssim_loss = 1.0 - self._compute_ssim(
-                rendered_img.permute(2, 0, 1).unsqueeze(0), # Convert [H, W, 3] to [1, 3, H, W]
-                gt_image.permute(2, 0, 1).unsqueeze(0), # Convert [H, W, 3] to [1, 3, H, W]
+                rendered_img.permute(2, 0, 1).unsqueeze(0),  # Convert [H, W, 3] to [1, 3, H, W]
+                gt_image.permute(2, 0, 1).unsqueeze(0),  # Convert [H, W, 3] to [1, 3, H, W]
             )
 
             loss = (
@@ -426,19 +429,56 @@ class GaussianTrainer:
                 progress.set_postfix(
                     {"loss": f"{loss:.4f}", "n_gauss": f"{gaussians.xyz.shape[0]:,}"}
                 )
+                self.loss_history.append(loss)
+                self.gaussian_history.append(gaussians.xyz.shape[0])
 
                 # Checkpoint
             if self.iteration % 1000 == 0:
                 self._save_checkpoint(gaussians, optimizer, output_path)
+                self.opacity_history.append(gaussians.opacity.mean().item())
 
             self.iteration += 1
             progress.update(1)
 
         progress.close()
         torch.save(gaussians.state_dict(), output_path / "final_model.pth")
+        self.draw_graphs()
         print(f"\nTraining complete! Model saved to {output_path}")
 
         return gaussians
+
+    def draw_graphs(self):
+        steps = range(0, len(self.loss_history) * 10, 10)
+        opacity_steps = range(0, len(self.opacity_history) * 1000, 1000)
+
+        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+        # Loss
+        axes[0].plot(steps, self.loss_history)
+        axes[0].set_xlabel('Iteration')
+        axes[0].set_ylabel('Loss')
+        axes[0].set_title('Training Loss')
+        axes[0].grid(True)
+
+        # Gaussian count
+        axes[1].plot(steps, self.gaussian_history)
+        axes[1].set_xlabel('Iteration')
+        axes[1].set_ylabel('Count')
+        axes[1].set_title('Gaussian Count')
+        axes[1].grid(True)
+
+        # Opacity mean
+        opacity_values = [o.item() if torch.is_tensor(o) else o for o in self.opacity_history]
+        axes[2].plot(opacity_steps, opacity_values)
+        axes[2].set_xlabel('Iteration')
+        axes[2].set_ylabel('Mean Opacity')
+        axes[2].set_title('Average Gaussian Opacity')
+        axes[2].grid(True)
+
+        plt.tight_layout()
+        plt.savefig('training_metrics.png', dpi=150)
+        print(f"Saved training graphs to training_metrics.png")
+        plt.close()
 
     def _rgb_to_sh0(self, rgb):
         # Normalize RGB
