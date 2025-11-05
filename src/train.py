@@ -3,6 +3,7 @@ import logging
 from logging import log, INFO
 
 from src.gaussians.training_config import TrainingConfig
+from src.training.export import export
 from src.training.multi_video_processor import MultiVideoProcessor
 from src.training.trainer import GaussianTrainer
 
@@ -46,10 +47,12 @@ def main():
 
     trainer = GaussianTrainer(config, device=args.device)
     gaussians = trainer.train(merged_data, args.output)
-
+    ply_output = args.output.replace('pth', 'ply')
     print("\n" + "=" * 60)
-    print(f"Training complete! Model saved to {args.output}")
+    print(f"Training complete! Model saved to {args.output}, Splat saved to {ply_output}")
     print("=" * 60)
+
+    export(args.output, ply_output)
 
 
 if __name__ == "__main__":
