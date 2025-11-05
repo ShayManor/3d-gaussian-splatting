@@ -79,20 +79,29 @@ class GaussianModel(nn.Module):
             max_scale = scales.amax(dim=-1)
 
             clone_mask = (grads_norm >= grads_threshold) & (max_scale <= extent * 0.1)
+            if clone_mask.sum() > 0:
+                self._clone_gaussians(clone_mask)
 
             # Split large gaussians (high gradients and large)
+            grads = self.xyz_gradient_accum / (self.xyz_gradient_count + 1e-8)
+            grads_norm = torch.norm(grads, dim=-1)
+            scales = self.get_scaling
+            max_scale = scales.amax(dim=-1)
+
             split_mask = (grads_norm >= grads_threshold) & (max_scale > extent * 0.1)
+            if split_mask.sum() > 0:
+                self._split_gaussians(split_mask)
 
             # Prune low opacity gaussians
+            scales = self.get_scaling
+            max_scale = scales.amax(dim=-1)
             prune_mask = (self.get_opacity < min_opacity).squeeze()
             big_points_mask = max_scale > extent / 2
             prune_mask = prune_mask | big_points_mask
 
-            if clone_mask.sum() > 0:
-                self._clone_gaussians(clone_mask)
 
-            if split_mask.sum() > 0:
-                self._split_gaussians(split_mask)
+
+
 
             if prune_mask.sum() > 0:
                 self._prune_gaussians(~prune_mask)  # not operator because prune removes
