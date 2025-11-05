@@ -100,8 +100,8 @@ class Calibrator:
             img2_t = img2_t.unsqueeze(0)
 
         # Grayscale
-        img1_gray = K.color.rgb_to_grayscale(img1_t)
-        img2_gray = K.color.rgb_to_grayscale(img2_t)
+        img1_gray = K.color.rgb_to_grayscale(img1_t).cuda()
+        img2_gray = K.color.rgb_to_grayscale(img2_t).cuda()
 
         with torch.no_grad():
             input_dict = {"image0": img1_gray, "image1": img2_gray}
