@@ -333,8 +333,8 @@ class GaussianTrainer:
             # L1 + SSIM loss
             l1_loss = F.l1_loss(rendered_img, gt_image)
             ssim_loss = 1.0 - self._compute_ssim(
-                rendered_img.permute(2, 0, 1).unsqueeze(0),
-                gt_image.permute(2, 0, 1).unsqueeze(0),
+                rendered_img.permute(2, 0, 1).unsqueeze(0), # Convert [H, W, 3] to [1, 3, H, W]
+                gt_image.permute(2, 0, 1).unsqueeze(0), # Convert [H, W, 3] to [1, 3, H, W]
             )
 
             loss = (

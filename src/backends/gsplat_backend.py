@@ -74,7 +74,8 @@ class GSplatBackend:
             sh_degree = 3
         else:
             colors = gaussian_params.get('colors', gaussian_params.get('features', None))
-            sh_degree = None
+            # sh_degree = None
+            sh_degree = 3
 
         # Camera parameters
         viewmat = viewpoint['world_view_transform']

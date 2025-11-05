@@ -1,6 +1,7 @@
 # Implementation of RANSAC for matching videos
 # Source: https://en.wikipedia.org/wiki/Random_sample_consensus
 # Written by Claude for testing, will re-implement later
+from logging import INFO, log
 from typing import Dict
 
 import numpy as np
@@ -182,7 +183,8 @@ def _align_video_to_reference(video_data: Dict, reference: Dict) -> Dict:
                 refined_pose[:3, 3] = (pose[:3, 3] @ R_icp.T) + t_icp
                 aligned_poses[i] = refined_pose
 
-    print(f"Alignment complete - scale: {s:.3f}, translation: {t}")
+    log(INFO, f"Alignment complete - scale: {s:.3f}, translation: {t}")
+    log(INFO,f"Check RGB (should be in range 0-255), Max Color: {video_data['colors'].max()}")
 
     return {
         'points_3d': aligned_points,
