@@ -28,7 +28,6 @@ class GaussianTrainer:
         self.iteration = 0
         self.loss_history = []
 
-
     def _initialize_gaussians(self, merged_data):
         """
         Initialize Gaussians from SFM point cloud
@@ -79,7 +78,9 @@ class GaussianTrainer:
                 colors_tensor = torch.tensor(
                     colors, device=self.device, dtype=torch.float32
                 )
-                gaussians.features_dc.data[:, 0, :] = colors_tensor[indices]
+                # convert to SH
+                sh_colors = self._rgb_to_sh0(colors_tensor[indices])
+                gaussians.features_dc.data[:, 0, :] = sh_colors
 
             # Smart scale initialization based on nearest neighbors
             self._initialize_scales_smart(gaussians, points_tensor)
@@ -316,11 +317,13 @@ class GaussianTrainer:
             }
 
             # Render with backend
-            with autocast(enabled=self.config.use_mixed_precision, device_type=self.device):
+            with autocast(
+                enabled=self.config.use_mixed_precision, device_type=self.device
+            ):
                 rendered = rasterizer.backend.render_with_depth(
                     gaussian_params,
                     viewpoint,
-                    bg_color=torch.ones(3, device=self.device),
+                    bg_color=torch.zeros(3, device=self.device),
                     render_mode="RGB",
                     device=str(self.device),
                 )
@@ -396,12 +399,15 @@ class GaussianTrainer:
                     gaussians.xyz_gradient_accum += gaussians.xyz.grad.data
                     gaussians.xyz_gradient_count += 1
 
-            if self.iteration > 500 and self.iteration % self.config.densify_interval == 0:
+            if (
+                self.iteration > 500
+                and self.iteration % self.config.densify_interval == 0
+            ):
                 gaussians.densify_and_prune(
                     grads_threshold=0.0002,
                     min_opacity=0.005,
                     extent=4.0,
-                    max_screen_size=20.0
+                    max_screen_size=20.0,
                 )
 
                 optimizer = self._setup_optimizer(gaussians)
@@ -417,10 +423,9 @@ class GaussianTrainer:
             self._update_learning_rate(optimizer)
 
             if self.iteration % 10 == 0:
-                progress.set_postfix({
-                    'loss': f"{loss:.4f}",
-                    'n_gauss': f"{gaussians.xyz.shape[0]:,}"
-                })
+                progress.set_postfix(
+                    {"loss": f"{loss:.4f}", "n_gauss": f"{gaussians.xyz.shape[0]:,}"}
+                )
 
                 # Checkpoint
             if self.iteration % 1000 == 0:
@@ -434,3 +439,12 @@ class GaussianTrainer:
         print(f"\nTraining complete! Model saved to {output_path}")
 
         return gaussians
+
+    def _rgb_to_sh0(self, rgb):
+        # Normalize RGB
+        if rgb.max() > 1.01:
+            rgb /= 255.0
+
+        # Calculated C0 coefficient
+        C0 = 0.28209479177387814
+        return (rgb - 0.5) / C0
