@@ -437,8 +437,9 @@ class GaussianTrainer:
                 self.gaussian_history.append(gaussians.xyz.shape[0])
 
                 # Checkpoint
-            if self.iteration % 1000 == 0:
+            if self.iteration % 10000 == 0:
                 self._save_checkpoint(gaussians, optimizer, output_path)
+            if self.iteration % 100 == 0:
                 self.opacity_history.append(gaussians.opacity.mean().item())
 
             self.iteration += 1
@@ -453,7 +454,7 @@ class GaussianTrainer:
 
     def draw_graphs(self):
         steps = range(0, len(self.loss_history) * 10, 10)
-        opacity_steps = range(0, len(self.opacity_history) * 1000, 1000)
+        opacity_steps = range(0, len(self.opacity_history) * 100, 100)
 
         fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 

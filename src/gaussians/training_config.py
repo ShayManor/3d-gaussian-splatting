@@ -16,18 +16,18 @@ class TrainingConfig:
     # Gaussians
     initial_gaussians: int = 1e5
     max_gaussians: int = 5e6
-    densify_interval: int = 100
-    prune_interval: int = 1000
-    opacity_reset_interval: int = 3000
+    densify_interval: int = 500
+    prune_interval: int = 2000
+    opacity_reset_interval: int = 5000
 
     # Training config
-    iterations_per_video: int = 3e4
+    iterations_per_video: int = 3e5
     batch_size: int = 4
     lr: float = 0.001
     position_lr_init: float = 0.00016
-    position_lr_final: float = 0.0000016
+    position_lr_final: float = 0.00000016
     position_lr_delay_mult: float = 0.01
-    position_lr_max_steps: int = 3e4
+    position_lr_max_steps: int = 3e5
 
     # GPU Optimizations
     use_mixed_precision: bool = True
