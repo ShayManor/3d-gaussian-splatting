@@ -18,6 +18,7 @@ class VideoSFM:
         self.matcher = LightGlue(features="superpoint").eval().to(device)
         self.calibrator = Calibrator(matcher)
 
+
     def process_video_frames(self, frames, video_path, stride=10):
         """
         Extract poses from series of video frames
@@ -39,10 +40,14 @@ class VideoSFM:
 
         prev_feats = None
         prev_frame_idx = 0
+        n_dupes = 0
 
         for i, frame_idx in enumerate(
             tqdm(frame_indices[1:], total=len(frame_indices) - 1, desc="Processing pairs"), 1
         ):
+            if self._too_similar(frames[prev_frame_idx], frames[frame_idx]):
+                prev_frame_idx = frame_idx
+                continue
             matches = self.calibrator.extract_all_matches(
                 [frames[prev_frame_idx], frames[frame_idx]]
             )
@@ -61,7 +66,20 @@ class VideoSFM:
                 poses.append(poses[-1])
                 continue
 
-            pts1 = pts1[inliers]  # No clue what this does
+            # Quick parralax check and drop small candidates
+            ninl = int(np.count_nonzero(inliers)) if inliers is not None else 0
+            flow_med = float(np.median(np.linalg.norm(pts2[inliers] - pts1[inliers], axis=1))) if ninl else 0.0
+
+            # TODO: Make this configurable
+            MIN_INLIERS = 20
+            MIN_FLOW_PX = 3.0
+            if ninl < MIN_INLIERS or flow_med < MIN_FLOW_PX:
+                # increase baseline and try the next candidate, do not triangulate
+                prev_frame_idx = frame_idx  # advance anchor
+                n_dupes += 1
+                continue
+
+            pts1 = pts1[inliers]
             pts2 = pts2[inliers]
 
             if len(pts1) < 30:
@@ -91,6 +109,11 @@ class VideoSFM:
             prev_frame_idx = frame_idx
 
         log(INFO, f"SFM complete: {len(poses)} poses, {len(points_3d)} 3D points")
+        if n_dupes > 0.3 * (len(frame_indices) - 1):
+            log(WARNING, f"Number of dupes (skip failures): {n_dupes}")
+        else:
+            log(INFO, f"Number of dupes (skip failures): {n_dupes}")
+
         return {
             "poses": np.array(poses),
             "intrinsics": K,
@@ -105,7 +128,7 @@ class VideoSFM:
         :return: Essential (3x3) matrix, mask for inline/outline
         """
         E, mask = cv2.findEssentialMat(
-            pts1, pts2, K, method=cv2.RANSAC, prob=0.999, threshold=1.2
+            pts1, pts2, K, method=cv2.RANSAC, prob=0.999, threshold=1.0
         )
         if E is None:
             return None, None, None
@@ -191,16 +214,49 @@ class VideoSFM:
 
         return X[mask] if mask.any() else None
 
-        # points_4d = cv2.triangulatePoints(P1, P2, pts1_h, pts2_h)  # Quaternions
-        # points_3d = points_4d[:3] / points_4d[3]
-        # log(INFO, f"Before filtering: {points_3d.shape[1]} points")
-        # Filter outliers based on reprojection error and depth
-        # mask = self._filter_triangulated_points(points_3d.T, pts1, pts2, P1, P2)
-        # log(
-        #     INFO,
-        #     f"After filtering: {mask.sum()} points (kept {mask.sum()}/{len(mask)})",
-        # )
-        # return points_3d.T[mask] if mask.any() else None
+    def _too_similar(self, img1, img2,
+                     corr_t=0.995, mad_t=0.6, flow_px=0.6, max_corners=400):
+        """
+        Function to check if frames are too similar and skip - written by AI because I can't be bothered
+        TODO: Improve this
+        """
+        # downscale + grayscale
+        g1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+        g2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+        h, w = g1.shape
+        s = 256.0 / max(h, w)
+        if s < 1.0:
+            g1 = cv2.resize(g1, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+            g2 = cv2.resize(g2, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+
+        # global histogram correlation (very cheap)
+        hist1 = cv2.calcHist([g1], [0], None, [32], [0, 256]);
+        cv2.normalize(hist1, hist1)
+        hist2 = cv2.calcHist([g2], [0], None, [32], [0, 256]);
+        cv2.normalize(hist2, hist2)
+        corr = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
+        if corr >= corr_t:
+            return True  # near-identical appearance
+
+        # mean absolute difference after blur (robust to noise)
+        b1 = cv2.GaussianBlur(g1, (3, 3), 0)
+        b2 = cv2.GaussianBlur(g2, (3, 3), 0)
+        mad = float(np.mean(np.abs(b1.astype(np.float32) - b2.astype(np.float32))))
+        if mad <= mad_t:
+            return True  # photometrically too close
+
+        # tiny KLT probe to measure motion
+        p0 = cv2.goodFeaturesToTrack(g1, maxCorners=max_corners, qualityLevel=0.01, minDistance=7,
+                                     useHarrisDetector=True, k=0.04)
+        if p0 is None or len(p0) < 20:
+            return True  # no texture, treat as unusable
+        p1, st, _ = cv2.calcOpticalFlowPyrLK(g1, g2, p0, None, winSize=(21, 21), maxLevel=2,
+                                             criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 1e-3))
+        if p1 is None or st is None:
+            return True
+        st = st.reshape(-1).astype(bool)
+        flow = np.linalg.norm(p1[st] - p0[st], axis=2).reshape(-1)
+        return float(np.median(flow)) < flow_px
 
     def _filter_triangulated_points(
         self,

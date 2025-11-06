@@ -15,7 +15,7 @@ class Calibrator:
         self.matcher = None
         self.alg = None
 
-        self.matcher = matcher
+        self.matcher_type = matcher
         self.setup_matcher()
 
     def setup_matcher(self):
@@ -31,8 +31,8 @@ class Calibrator:
                 self.loftr = self.loftr.cuda()
         except ImportError:
             self.matcher_type = "opencv"
-            self.alg = cv2.ORB.create(nfeatures=3000)
-            self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+            self.alg = cv2.ORB.create(nfeatures=3000, scoreType=cv2.ORB_HARRIS_SCORE, fastThreshold=20)
+            self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
     def extract_all_matches(self, frames):
         """
@@ -40,7 +40,6 @@ class Calibrator:
         :param frames: all video frames
         :return: a np array of all matches in the form of (frame_idx1, frame_idx2, pts1, pts2)
         """
-        # log(INFO, f"Processing {len(frames)} frames")
         all_matches = []
         for i in range(len(frames) - 1):
             if self.matcher_type == "opencv":
@@ -92,7 +91,9 @@ class Calibrator:
         """
         import kornia as K
 
-        img1_t = K.image_to_tensor(img1).float() / 255.0  # normalize
+        img1 = cv2.cvtColor(img1, cv2.COLOR_BGR2RGB)
+        img2 = cv2.cvtColor(img2, cv2.COLOR_BGR2RGB)
+        img1_t = K.image_to_tensor(img1).float() / 255.0
         img2_t = K.image_to_tensor(img2).float() / 255.0
 
         if len(img1_t.shape) == 3:
@@ -117,6 +118,9 @@ class Calibrator:
 
             # Filter by confidence
             mask = confidence > 0.5
+            # flow = np.linalg.norm(mkpts1 - mkpts0, axis=1)
+            # mask = mask & (flow >= 1.0)  # keep real motion; tune 0.8–1.5
+
             mkpts0 = mkpts0[mask]
             mkpts1 = mkpts1[mask]
 
