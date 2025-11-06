@@ -315,7 +315,7 @@ class GaussianTrainer:
         for view_data in batch:
             # Create viewpoint
             viewpoint = {
-                "world_view_transform": torch.inverse(view_data["pose"]),
+                "world_view_transform": view_data["pose"],
                 "projection_matrix": self._get_projection_matrix(
                     view_data["K"], view_data["width"], view_data["height"]
                 ),
