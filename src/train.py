@@ -16,7 +16,7 @@ def main():
     parser.add_argument('--cache_dir', type=str, default='./cache', help='Cache directory')
     parser.add_argument('--stride', type=int, default=10, help='Frame sampling stride')
     parser.add_argument('--device', type=str, default='cuda', help='Device to use')
-    parser.add_argument('--iterations', type=int, default=30000, help='Training iterations')
+    parser.add_argument('--iterations', type=int, default=300000, help='Training iterations')
     parser.add_argument('--distributed', type=bool, default=False, help='Distributed training among multiple GPUs')
     parser.add_argument('--batch_size', type=int, default=4, help='Batch size for training')
     parser.add_argument('--matcher', type=str, default="opencv", help='Matcher for correlating points')
