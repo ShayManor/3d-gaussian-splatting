@@ -254,50 +254,6 @@ class VideoSFM:
         # log(INFO, f"  Final: {final_mask.sum()}/{len(final_mask)} points pass both filters")
         return final_mask
 
-        # # Check depths
-        # depths1 = (
-        #     P1[2:3] @ np.hstack([points_3d, np.ones((len(points_3d), 1))]).T
-        # ).flatten()
-        # depths2 = (
-        #     P2[2:3] @ np.hstack([points_3d, np.ones((len(points_3d), 1))]).T
-        # ).flatten()
-        #
-        # depth_mask = (
-        #     (depths1 > min_depth)
-        #     & (depths1 < max_depth)
-        #     & (depths2 > min_depth)
-        #     & (depths2 < max_depth)
-        # )
-        #
-        # log(
-        #     INFO,
-        #     f"  Depth filter: {depth_mask.sum()}/{len(depth_mask)} points pass (depths range: [{depths1.min():.2f}, {depths1.max():.2f}])",
-        # )
-        #
-        # # Reprojection errors
-        # points_h = np.hstack([points_3d, np.ones((len(points_3d), 1))])
-        #
-        # proj1 = (P1 @ points_h.T).T
-        # proj1 = proj1[:, :2] / proj1[:, 2:3]
-        #
-        # proj2 = (P2 @ points_h.T).T
-        # proj2 = proj2[:, :2] / proj2[:, 2:3]
-        #
-        # errors1 = np.linalg.norm(proj1 - pts1, axis=1)
-        # errors2 = np.linalg.norm(proj2 - pts2, axis=1)
-        #
-        # error_mask = (errors1 < max_reproj_error) & (errors2 < max_reproj_error)
-        # log(
-        #     INFO,
-        #     f"  Reproj filter: {error_mask.sum()}/{len(error_mask)} points pass (errors range: [{errors1.min():.2f}, {errors1.max():.2f}])",
-        # )
-        # final_mask = depth_mask & error_mask
-        # log(
-        #     INFO,
-        #     f"  Final: {final_mask.sum()}/{len(final_mask)} points pass both filters",
-        # )
-        #
-        # return final_mask
 
     def _extract_point_colors(self, frame, pts):
         """

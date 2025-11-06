@@ -100,8 +100,12 @@ class Calibrator:
             img2_t = img2_t.unsqueeze(0)
 
         # Grayscale
-        img1_gray = K.color.rgb_to_grayscale(img1_t).cuda()
-        img2_gray = K.color.rgb_to_grayscale(img2_t).cuda()
+        if torch.cuda.is_available():
+            img1_gray = K.color.rgb_to_grayscale(img1_t).cuda()
+            img2_gray = K.color.rgb_to_grayscale(img2_t).cuda()
+        else:
+            img1_gray = K.color.rgb_to_grayscale(img1_t)
+            img2_gray = K.color.rgb_to_grayscale(img2_t)
 
         with torch.no_grad():
             input_dict = {"image0": img1_gray, "image1": img2_gray}
@@ -325,3 +329,23 @@ class Calibrator:
         else:
             log(WARNING, f"Poor calibration - could still work. Error: {error}")
         return K_refined
+
+    def identify_intrinsics_cheap(self, image_path):
+        """
+        Estimates camera intrinsic matrix from image path quickly - for tests
+        :param image_path: path to video
+        :return: camera intrinsics matrix
+        """
+        import cv2
+        import numpy as np
+
+        img = cv2.imread(image_path)
+        height, width = img.shape[:2]
+
+        initial_focal = 1.2 * max(width, height)
+        log(INFO, f"Focal: {initial_focal}")
+        cx, cy = width / 2, height / 2
+        K_init = np.array(
+            [[initial_focal, 0, cx], [0, initial_focal, cy], [0, 0, 1]]
+        )  # https://ksimek.github.io/2013/08/13/intrinsic
+        return K_init

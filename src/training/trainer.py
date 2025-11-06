@@ -421,7 +421,7 @@ class GaussianTrainer:
             # Reset opacity periodically
             if self.iteration % self.config.opacity_reset_interval == 0:
                 with torch.no_grad():
-                    # mask = gaussians.get_opacity < 0.01
+                    # mask = gaussians.get_opacity < 0.01  # Not sure which one is good
                     mask = gaussians.get_opacity > 0.95
                     gaussians.opacity.data[mask] = torch.logit(
                         torch.ones_like(gaussians.opacity.data[mask]) * 0.01

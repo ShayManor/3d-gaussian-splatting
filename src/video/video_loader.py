@@ -24,12 +24,15 @@ class VideoLoader:
             return self.frame_cache[idx]
 
         self.capture.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        data, frame = self.capture.read()
+        ok, frame = self.capture.read()
 
-        if data and self.frame_cache:
+        if not ok:
+            raise RuntimeError("Can not read video")
+
+        if ok and self.frame_cache:
             self.frame_cache[idx] = frame
 
-        return frame if data else None
+        return frame if ok else None
 
     def get_frame_generator(self, indices):
         """
