@@ -90,7 +90,7 @@ class GaussianTrainer:
 
             # Initialize opacity to be slightly visible
             gaussians.opacity.data = torch.logit(
-                torch.ones(n_gaussians, 1, device=self.device) * 0.1
+                torch.ones(n_gaussians, 1, device=self.device) * 0.01
             )
 
         return gaussians
@@ -332,6 +332,8 @@ class GaussianTrainer:
                 )
 
             rendered_img = rendered["render"]  # [H, W, 3]
+            if rendered_img.shape[0] == 3:  # If [C, H, W]
+                rendered_img = rendered_img.permute(1, 2, 0)  # Convert to [H, W, C]
             gt_image = view_data["image"]  # [H, W, 3]
             # L1 + SSIM loss
             l1_loss = F.l1_loss(rendered_img, gt_image)
@@ -412,7 +414,8 @@ class GaussianTrainer:
                     extent=4.0,
                     max_screen_size=20.0,
                 )
-
+                gaussians.xyz_gradient_accum.zero_()
+                gaussians.xyz_gradient_count.zero_()
                 optimizer = self._setup_optimizer(gaussians)
 
             # Reset opacity periodically
@@ -483,8 +486,8 @@ class GaussianTrainer:
     def _rgb_to_sh0(self, rgb):
         # Normalize RGB
         if rgb.max() > 1.01:
-            rgb /= 255.0
+            rgb = rgb / 255.0
 
-        # Calculated C0 coefficient
+        # Calculated C0 coefficient = sqrt(1/4pi)
         C0 = 0.28209479177387814
         return (rgb - 0.5) / C0
