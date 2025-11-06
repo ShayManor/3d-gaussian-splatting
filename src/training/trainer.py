@@ -12,6 +12,7 @@ from tqdm import tqdm
 from src.gaussians.gaussian_model import GaussianModel
 from src.gaussians.gaussian_rasterizer import GaussianRasterizer
 from src.gaussians.training_config import TrainingConfig
+from src.training.export import export
 from src.video.video_loader import VideoLoader
 
 from sklearn.neighbors import NearestNeighbors
@@ -276,6 +277,7 @@ class GaussianTrainer:
         """
         Save training checkpoint
         """
+        model_pth = output_path / f"checkpoint_{self.iteration}.pth"
         torch.save(
             {
                 "iteration": self.iteration,
@@ -283,8 +285,10 @@ class GaussianTrainer:
                 "optimizer_state": optimizer.state_dict(),
                 "n_gaussians": gaussians.xyz.shape[0],
             },
-            output_path / f"checkpoint_{self.iteration}.pth",
+            model_pth,
         )
+
+        export(str(model_pth), str(model_pth).replace('pth', 'ply'))
 
     def _training_step(
         self,
@@ -439,6 +443,7 @@ class GaussianTrainer:
                 # Checkpoint
             if self.iteration % 10000 == 0:
                 self._save_checkpoint(gaussians, optimizer, output_path)
+
             if self.iteration % 100 == 0:
                 self.opacity_history.append(gaussians.opacity.mean().item())
 
