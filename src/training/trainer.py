@@ -401,7 +401,7 @@ class GaussianTrainer:
             # Accumulate gradients for densification
             with torch.no_grad():
                 if gaussians.xyz.grad is not None:
-                    gaussians.xyz_gradient_accum += gaussians.xyz.grad.data
+                    gaussians.xyz_gradient_accum += torch.norm(gaussians.xyz.grad, dim=-1, keepdim=True)
                     gaussians.xyz_gradient_count += 1
 
             if (
@@ -409,19 +409,20 @@ class GaussianTrainer:
                 and self.iteration % self.config.densify_interval == 0
             ):
                 gaussians.densify_and_prune(
-                    grads_threshold=0.0002,
+                    grads_threshold=0.00002,
                     min_opacity=0.005,
-                    extent=4.0,
+                    extent=1.0,
                     max_screen_size=20.0,
                 )
-                gaussians.xyz_gradient_accum.zero_()
-                gaussians.xyz_gradient_count.zero_()
+                gaussians.xyz_gradient_accum.zero_()  # Double check
+                gaussians.xyz_gradient_count.zero_()  # Double check
                 optimizer = self._setup_optimizer(gaussians)
 
             # Reset opacity periodically
             if self.iteration % self.config.opacity_reset_interval == 0:
                 with torch.no_grad():
-                    mask = gaussians.get_opacity < 0.01
+                    # mask = gaussians.get_opacity < 0.01
+                    mask = gaussians.get_opacity > 0.95
                     gaussians.opacity.data[mask] = torch.logit(
                         torch.ones_like(gaussians.opacity.data[mask]) * 0.01
                     )
