@@ -51,7 +51,7 @@ class Calibrator:
                 kp1, des1 = self.alg.detectAndCompute(gray1, None)
                 kp2, des2 = self.alg.detectAndCompute(gray2, None)
 
-                if not (des1 and des2):
+                if des1 is None or des2 is None or len(des1) == 0 or len(des2) == 0:
                     log(WARNING, "Error in matching! - Skipping")
                     continue
 
