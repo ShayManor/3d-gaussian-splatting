@@ -13,10 +13,10 @@ class VideoSFM:
     Class representing one video and getting the structure from frames
     """
 
-    def __init__(self, device="cuda"):
+    def __init__(self, device="cuda", matcher="opencv"):
         self.extractor = SuperPoint().eval().to(device)  # More robust to changes
         self.matcher = LightGlue(features="superpoint").eval().to(device)
-        self.calibrator = Calibrator()
+        self.calibrator = Calibrator(matcher)
 
     def process_video_frames(self, frames, video_path, stride=10):
         """
@@ -105,7 +105,7 @@ class VideoSFM:
         :return: Essential (3x3) matrix, mask for inline/outline
         """
         E, mask = cv2.findEssentialMat(
-            pts1, pts2, K, method=cv2.RANSAC, prob=0.999, threshold=1.0
+            pts1, pts2, K, method=cv2.RANSAC, prob=0.999, threshold=1.2
         )
         if E is None:
             return None, None, None

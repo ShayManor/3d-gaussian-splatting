@@ -11,6 +11,7 @@ class TrainingConfig:
     frame_stride: int = 10  # sampling
     image_scale: float = 1.0
     cache_dir: str = "./cache"
+    matcher: str = "opencv"  # opencv or loftr
 
     # Gaussians
     initial_gaussians: int = 1e5

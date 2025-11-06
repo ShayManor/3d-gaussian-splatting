@@ -18,9 +18,10 @@ class MultiVideoProcessor:
     Processes multiple videos in order and turns them into one coordinate system.
     """
 
-    def __init__(self, cache="./cache", device="cuda", max_frames_per_video=100_000):
+    def __init__(self, cache="./cache", device="cuda", max_frames_per_video=100_000, matcher="opencv"):
         self.cache_dir = Path(cache)
         self.use_cache = True
+        self.matcher = matcher
         if self.cache_dir is None:
             self.use_cache = False
         else:
@@ -47,7 +48,7 @@ class MultiVideoProcessor:
                 with open(video_cache, "rb") as f:
                     video_data = pickle.load(f)
             else:
-                video_data = self._process_single_video(video_path, stride)
+                video_data = self._process_single_video(video_path, stride, self.matcher)
                 with open(video_cache, "wb") as f:
                     pickle.dump(video_data, f)
 
@@ -56,7 +57,7 @@ class MultiVideoProcessor:
         merged_data = self._merge_videos(all_video_data)
         return merged_data
 
-    def _process_single_video(self, video_path: str, stride: int) -> Dict:
+    def _process_single_video(self, video_path: str, stride: int, matcher) -> Dict:
         """
         Processes a single video with SFM
         :param video_path: Path to individual video
@@ -64,7 +65,7 @@ class MultiVideoProcessor:
         :return: Processes SFM video
         """
         loader = VideoLoader(video_path, self.use_cache)
-        processor = VideoSFM(self.device)
+        processor = VideoSFM(self.device, matcher=matcher)
 
         num_frames = min(loader.total_frames, self.max_frames_per_video)
         frame_indices = list(range(0, num_frames, stride))

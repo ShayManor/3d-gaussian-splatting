@@ -19,6 +19,7 @@ def main():
     parser.add_argument('--iterations', type=int, default=30000, help='Training iterations')
     parser.add_argument('--distributed', type=bool, default=False, help='Distributed training among multiple GPUs')
     parser.add_argument('--batch_size', type=int, default=4, help='Batch size for training')
+    parser.add_argument('--matcher', type=str, default="opencv", help='Matcher for correlating points')
 
     args = parser.parse_args()
 
@@ -28,11 +29,13 @@ def main():
     config.cache_dir = args.cache_dir
     config.distributed = args.distributed
     config.batch_size = args.batch_size
+    config.matcher = args.matcher
 
     log(INFO, "Processing videos...")
     processor = MultiVideoProcessor(
         cache=args.cache_dir,
-        device=args.device
+        device=args.device,
+        matcher=config.matcher,
     )
 
     merged_data = processor.process_videos(

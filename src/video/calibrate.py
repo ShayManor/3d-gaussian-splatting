@@ -31,8 +31,8 @@ class Calibrator:
                 self.loftr = self.loftr.cuda()
         except ImportError:
             self.matcher_type = "opencv"
-            self.alg = cv2.ORB.create(nfeatures=1000)
-            self.matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
+            self.alg = cv2.ORB.create(nfeatures=3000)
+            self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
 
     def extract_all_matches(self, frames):
         """
