@@ -81,6 +81,12 @@ class MultiVideoProcessor:
         sfm_data = processor.process_video_frames(frames, video_path, stride=1)
         sfm_data["video_path"] = video_path
         sfm_data["fps"] = loader.fps
+        local_pose_ids = sfm_data["frame_indices"]
+
+        sfm_data["frame_indices"] = np.array(frame_indices, dtype=int)[local_pose_ids]
+
+        print("RAW SFM pose[0]:\n", sfm_data["poses"][0])
+        print("RAW SFM pose[1]:\n", sfm_data["poses"][1])
 
         return sfm_data
 
@@ -98,6 +104,7 @@ class MultiVideoProcessor:
                 "colors": video["colors"],
                 "all_poses": [video["poses"]],
                 "all_intrinsics": [video["intrinsics"]],
+                "frame_indices": [video["frame_indices"]],
                 "video_info": [
                     {
                         "path": video["video_path"],
@@ -112,6 +119,7 @@ class MultiVideoProcessor:
             "colors": video_data_list[0]["colors"],
             "all_poses": [video_data_list[0]["poses"]],
             "all_intrinsics": [video_data_list[0]["intrinsics"]],
+            "frame_indices": [video_data_list[0]["frame_indices"]],
             "video_info": [
                 {
                     "path": video_data_list[0]["video_path"],
@@ -184,12 +192,3 @@ class MultiVideoProcessor:
 
         return merged_data
 
-
-    # def _align_video_to_reference(self, video_data: Dict, reference: Dict) -> Dict:
-    #     """
-    #     Aligns a video with feature matching
-    #     :param video_data: Points, poses, colors
-    #     :param reference: Reference video
-    #     :return: matched videos
-    #     """
-    #
