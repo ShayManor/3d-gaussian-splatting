@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 import argparse
+import logging
+
 import cv2
 import numpy as np
 
 # use your codebase
 from src.video.calibrate import Calibrator
 from src.video.video_sfm import VideoSFM
+logging.basicConfig(level=logging.INFO)
 
 def draw_lines(img1, img2, pts1, pts2, max_draw=120):
     """Side-by-side draw without cv2.drawMatches (we only have coords)."""
@@ -52,7 +55,7 @@ def triangulate_metrics(K, R, t, pts1, pts2):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--img1", default="../data/mid_01.png")
-    ap.add_argument("--img2", default="../data/mid_02.png")
+    ap.add_argument("--img2", default="../data/mid_07.png")
     ap.add_argument("--out_raw", default="matches_raw.jpg")
     ap.add_argument("--out_inl", default="matches_inliers_E.jpg")
     ap.add_argument("--px", type=float, default=1.2, help="Essential RANSAC pixel threshold")
