@@ -1,4 +1,4 @@
-from logging import log, WARNING, INFO
+from logging import log, WARNING, INFO, DEBUG
 from pathlib import Path
 from typing import List, Dict
 
@@ -91,10 +91,49 @@ class GaussianTrainer:
 
             # Initialize opacity to be slightly visible
             gaussians.opacity.data = torch.logit(
-                torch.ones(n_gaussians, 1, device=self.device) * 0.01
+                torch.ones(n_gaussians, 1, device=self.device) * 0.005
             )
 
+            log(
+                DEBUG,
+                "pts3d mean/std/min/max",
+                points_3d.mean(0),
+                points_3d.std(0),
+                points_3d.min(0),
+                points_3d.max(0),
+            )
+            log(DEBUG, "first pose translation", merged_data["all_poses"][0][:3, 3])
+
         return gaussians
+
+    def debug_reprojection(
+        self, points_3d, poses, K, frame, out_path="debug_reproj.png"
+    ):
+        """Reprojections for debug and testing - not production code - written by AI"""
+        import cv2
+        import numpy as np
+
+        pose0 = poses[0]  # this is W2C (4x4)
+        K = np.array(K)
+
+        # project all points
+        X = np.asarray(points_3d)
+        X_h = np.concatenate([X, np.ones((X.shape[0], 1))], axis=1)  # Nx4
+        X_c = (pose0 @ X_h.T).T  # camera coords
+        Z = X_c[:, 2]
+        good = Z > 0
+        X_c = X_c[good]
+        Z = Z[good]
+
+        proj = (K @ X_c[:, :3].T).T
+        proj = proj[:, :2] / proj[:, 2:3]
+
+        img = frame.copy()
+        for u, v in proj.astype(int):
+            if 0 <= u < img.shape[1] and 0 <= v < img.shape[0]:
+                img[v, u] = (0, 0, 255)
+
+        cv2.imwrite(out_path, img)
 
     def _initialize_scales_smart(self, gaussians, points):
         """
@@ -110,12 +149,10 @@ class GaussianTrainer:
         distances, _ = nbrs.kneighbors(positions)
 
         # Average distance as scale
-        avg_distances = (
-            distances[:, 1:].mean(axis=1) if distances.shape[1] > 1 else distances[:, 0]
-        )
+        avg_distances = distances[:, 1:].mean(axis=1) if distances.shape[1] > 1 else distances[:, 0]
 
         scales = torch.tensor(avg_distances, device=self.device, dtype=torch.float32)
-        scales = scales.clamp(min=1e-7)
+        scales = scales.clamp(min=1e-9)
         scales = torch.log(scales.unsqueeze(1).expand(-1, 3))
 
         gaussians.scaling.data = scales
@@ -155,9 +192,12 @@ class GaussianTrainer:
 
             # Sample frames with stride
             total_frames = min(loader.total_frames, len(poses))
-            frame_indices = list(range(0, total_frames, self.config.frame_stride))
+            frame_indices = merged_data["frame_indices"][i]
 
             for j, frame_idx in enumerate(frame_indices[: len(poses)]):
+                if i == 0 and j == 0:
+                    log(DEBUG, "LOADER first pose:\n", poses[0])
+                    log(DEBUG, "LOADER first frame_idx:", frame_idx)
                 all_views.append(
                     {
                         "video_path": video_path,
@@ -288,7 +328,7 @@ class GaussianTrainer:
             model_pth,
         )
 
-        export(str(model_pth), str(model_pth).replace('pth', 'ply'))
+        export(str(model_pth), str(model_pth).replace("pth", "ply"))
 
     def _training_step(
         self,
@@ -342,8 +382,12 @@ class GaussianTrainer:
             # L1 + SSIM loss
             l1_loss = F.l1_loss(rendered_img, gt_image)
             ssim_loss = 1.0 - self._compute_ssim(
-                rendered_img.permute(2, 0, 1).unsqueeze(0),  # Convert [H, W, 3] to [1, 3, H, W]
-                gt_image.permute(2, 0, 1).unsqueeze(0),  # Convert [H, W, 3] to [1, 3, H, W]
+                rendered_img.permute(2, 0, 1).unsqueeze(
+                    0
+                ),  # Convert [H, W, 3] to [1, 3, H, W]
+                gt_image.permute(2, 0, 1).unsqueeze(
+                    0
+                ),  # Convert [H, W, 3] to [1, 3, H, W]
             )
 
             loss = (
@@ -382,6 +426,16 @@ class GaussianTrainer:
         gaussians = self._initialize_gaussians(merged_data)
         print(f"Initialized {gaussians.xyz.shape[0]} Gaussians")
 
+        # Debug block
+        from src.video.video_loader import VideoLoader
+
+        poses0 = merged_data["all_poses"][0]
+        K0 = merged_data["all_intrinsics"][0]
+        video0 = merged_data["video_info"][0]["path"]
+        frame0 = VideoLoader(video0, cache_frames=False).get_frame(0)
+        self.debug_reprojection(merged_data["points_3d"], poses0, K0, frame0,
+                           out_path="debug_reproj_points.png")
+
         optimizer = self._setup_optimizer(gaussians)
 
         # Setup rasterizer with first camera's intrinsics
@@ -392,6 +446,54 @@ class GaussianTrainer:
             K=K, device=str(self.device), enable_caching=True, backend="gsplat"
         )
         train_loader = self._create_data_loader(merged_data)
+
+        # DEBUG: one batch, one forward, no grad - Test reprojection and SFM
+        dbg_batch = next(train_loader)
+        dbg_view = dbg_batch[0]
+
+        viewpoint = {
+            "world_view_transform": torch.tensor(
+                dbg_view["pose"], device=self.device, dtype=torch.float32
+            ),
+            "projection_matrix": self._get_projection_matrix(
+                dbg_view["K"], dbg_view["width"], dbg_view["height"]
+            ),
+            "image_width": dbg_view["width"],
+            "image_height": dbg_view["height"],
+        }
+        gaussian_params = {
+            "means3D": gaussians.get_xyz,
+            "scales": gaussians.get_scaling,
+            "rotations": gaussians.get_rotation,
+            "opacities": gaussians.get_opacity,
+            "shs": gaussians.get_features,
+        }
+
+        with torch.no_grad():
+            out = rasterizer.backend.render_with_depth(
+                gaussian_params,
+                viewpoint,
+                bg_color=torch.zeros(3, device=self.device),
+                render_mode="RGB",
+                device=str(self.device),
+            )
+            img = out["render"]
+            if img.shape[0] == 3:  # [C,H,W] -> [H,W,C]
+                img = img.permute(1, 2, 0)
+            gt = dbg_view["image"]
+
+        import cv2
+        cv2.imwrite("debug_init_render.png",
+                    (img.clamp(0, 1).cpu().numpy() * 255).astype("uint8"))
+        cv2.imwrite("debug_init_gt.png",
+                    (gt.clamp(0, 1).cpu().numpy() * 255).astype("uint8"))
+
+        p = dbg_view["pose"].cpu()
+        print("pose shape:", p.shape)
+        print("pose[0]:\n", p)  # full 4x4
+
+        print("det(R):", np.linalg.det(p[:3, :3]))
+        print("t:", p[:3, 3])
 
         # training loop
         progress = tqdm(total=int(self.config.iterations_per_video), desc="Training")
@@ -405,18 +507,23 @@ class GaussianTrainer:
             # Accumulate gradients for densification
             with torch.no_grad():
                 if gaussians.xyz.grad is not None:
-                    gaussians.xyz_gradient_accum += torch.norm(gaussians.xyz.grad, dim=-1, keepdim=True)
+                    gaussians.xyz_gradient_accum += torch.norm(
+                        gaussians.xyz.grad, dim=-1, keepdim=True
+                    )
                     gaussians.xyz_gradient_count += 1
 
             if (
-                self.iteration > 500
+                self.iteration > 5000
                 and self.iteration % self.config.densify_interval == 0
             ):
+                points_3d = merged_data["points_3d"]
+                bbox = points_3d.max(0) - points_3d.min(0)
+                scene_extent = float(bbox.max())  # scalar (on testing ~38)
                 gaussians.densify_and_prune(
-                    grads_threshold=0.00002,
+                    grads_threshold=5e-4,
                     min_opacity=0.005,
-                    extent=1.0,
-                    max_screen_size=20.0,
+                    extent=scene_extent,
+                    max_screen_size=12.0,
                 )
                 gaussians.xyz_gradient_accum.zero_()  # Double check
                 gaussians.xyz_gradient_count.zero_()  # Double check
@@ -426,9 +533,11 @@ class GaussianTrainer:
             if self.iteration % self.config.opacity_reset_interval == 0:
                 with torch.no_grad():
                     # mask = gaussians.get_opacity < 0.01  # Not sure which one is good
-                    mask = gaussians.get_opacity > 0.95
+                    mask = gaussians.get_opacity > 0.98
                     gaussians.opacity.data[mask] = torch.logit(
-                        torch.ones_like(gaussians.opacity.data[mask]) * 0.01
+                        torch.full_like(
+                            gaussians.opacity.data[mask], 0.2
+                        )  # or 0.01–0.2
                     )
 
             self._update_learning_rate(optimizer)
@@ -445,7 +554,7 @@ class GaussianTrainer:
                 self._save_checkpoint(gaussians, optimizer, output_path)
 
             if self.iteration % 100 == 0:
-                self.opacity_history.append(gaussians.opacity.mean().item())
+                self.opacity_history.append(gaussians.get_opacity.mean().item())
 
             self.iteration += 1
             progress.update(1)
@@ -465,29 +574,31 @@ class GaussianTrainer:
 
         # Loss
         axes[0].plot(steps, self.loss_history)
-        axes[0].set_xlabel('Iteration')
-        axes[0].set_ylabel('Loss')
-        axes[0].set_title('Training Loss')
+        axes[0].set_xlabel("Iteration")
+        axes[0].set_ylabel("Loss")
+        axes[0].set_title("Training Loss")
         axes[0].grid(True)
 
         # Gaussian count
         axes[1].plot(steps, self.gaussian_history)
-        axes[1].set_xlabel('Iteration')
-        axes[1].set_ylabel('Count')
-        axes[1].set_title('Gaussian Count')
+        axes[1].set_xlabel("Iteration")
+        axes[1].set_ylabel("Count")
+        axes[1].set_title("Gaussian Count")
         axes[1].grid(True)
 
         # Opacity mean
-        opacity_values = [o.item() if torch.is_tensor(o) else o for o in self.opacity_history]
+        opacity_values = [
+            o.item() if torch.is_tensor(o) else o for o in self.opacity_history
+        ]
         axes[2].plot(opacity_steps, opacity_values)
-        axes[2].set_xlabel('Iteration')
-        axes[2].set_ylabel('Mean Opacity')
-        axes[2].set_title('Average Gaussian Opacity')
+        axes[2].set_xlabel("Iteration")
+        axes[2].set_ylabel("Mean Opacity")
+        axes[2].set_title("Average Gaussian Opacity")
         axes[2].grid(True)
 
         plt.tight_layout()
-        plt.savefig('training_metrics.png', dpi=150)
-        print(f"Saved training graphs to training_metrics.png")
+        plt.savefig("training_metrics.png", dpi=150)
+        print("Saved training graphs to training_metrics.png")
         plt.close()
 
     def _rgb_to_sh0(self, rgb):
