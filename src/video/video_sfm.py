@@ -1,4 +1,4 @@
-from logging import log, WARNING, INFO
+from logging import log, WARNING, INFO, DEBUG
 
 import cv2
 import numpy as np
@@ -19,7 +19,7 @@ class VideoSFM:
         self.calibrator = Calibrator(matcher)
 
 
-    def process_video_frames(self, frames, video_path, stride=10):
+    def process_video_frames(self, frames, video_path, stride=5):
         """
         Extract poses from series of video frames
         :param frames: Series of frames
@@ -34,19 +34,29 @@ class VideoSFM:
 
         points_3d = []
         point_colors = []
-        point_map_ids = {}
 
         frame_indices = list(range(0, len(frames), stride))
 
-        prev_feats = None
+        if not frame_indices:
+            return {
+                "poses": np.empty((0, 4, 4)),
+                "intrinsics": self.calibrator.identify_intrinsics([], video_path),
+                "points_3d": np.empty((0, 3)),
+                "colors": np.empty((0, 3)),
+                "frame_indices": np.empty((0,), int),
+            }
+
+
         prev_frame_idx = 0
+        pose_frame_indices = [frame_indices[0]]
         n_dupes = 0
 
         for i, frame_idx in enumerate(
             tqdm(frame_indices[1:], total=len(frame_indices) - 1, desc="Processing pairs"), 1
         ):
             if self._too_similar(frames[prev_frame_idx], frames[frame_idx]):
-                prev_frame_idx = frame_idx
+                # prev_frame_idx = frame_idx
+                n_dupes += 1
                 continue
             matches = self.calibrator.extract_all_matches(
                 [frames[prev_frame_idx], frames[frame_idx]]
@@ -57,13 +67,16 @@ class VideoSFM:
                 log(
                     WARNING, f"Not enough matches ({len(matches[0]['pts1'])}) in frame!"
                 )
+                # prev_frame_idx = frame_idx
+                n_dupes += 1
                 continue
 
             pts1, pts2 = matches[0]["pts1"], matches[0]["pts2"]
 
             R, t, inliers = self.estimate_pose_from_matches(pts1, pts2, K)
             if R is None:
-                poses.append(poses[-1])
+                # prev_frame_idx = frame_idx
+                n_dupes += 1
                 continue
 
             # Quick parralax check and drop small candidates
@@ -71,20 +84,20 @@ class VideoSFM:
             flow_med = float(np.median(np.linalg.norm(pts2[inliers] - pts1[inliers], axis=1))) if ninl else 0.0
 
             # TODO: Make this configurable
-            MIN_INLIERS = 20
-            MIN_FLOW_PX = 3.0
+            MIN_INLIERS = 100
+            MIN_FLOW_PX = 4.0
             if ninl < MIN_INLIERS or flow_med < MIN_FLOW_PX:
                 # increase baseline and try the next candidate, do not triangulate
-                prev_frame_idx = frame_idx  # advance anchor
+                # prev_frame_idx = frame_idx  # advance anchor
                 n_dupes += 1
                 continue
 
             pts1 = pts1[inliers]
             pts2 = pts2[inliers]
 
-            if len(pts1) < 30:
-                poses.append(poses[-1])
-                continue
+            # if len(pts1) < 30:
+            #     poses.append(poses[-1])
+            #     continue
 
             # Builds absolute pose
             pose = np.eye(4)
@@ -92,13 +105,14 @@ class VideoSFM:
             pose[:3, 3] = t.squeeze()
             absolute_pose = pose @ poses[-1]  # world to camera
             poses.append(absolute_pose)
+            pose_frame_indices.append(frame_idx)
 
             # Triangulate new points
             if len(poses) > 1:
                 new_points = self.triangulate_points(
                     pts1, pts2, K, poses[-2], poses[-1]
                 )
-                if new_points is not None:
+                if new_points is not None and len(new_points):
                     points_3d.extend(new_points)
                     # Extract colors from frame
                     colors = self._extract_point_colors(frames[frame_idx], pts2)
@@ -114,12 +128,19 @@ class VideoSFM:
         else:
             log(INFO, f"Number of dupes (skip failures): {n_dupes}")
 
+        poses = np.array(poses)
+
+        log(DEBUG, "SFM poses[0]:\n", poses[0])
+        if len(poses) > 1:
+            log(DEBUG, "SFM poses[1]:\n", poses[1])
+        log(DEBUG, "SFM #3D points:", len(points_3d))
+
         return {
             "poses": np.array(poses),
             "intrinsics": K,
             "points_3d": np.array(points_3d) if points_3d else np.empty((0, 3)),
             "colors": np.array(point_colors) if point_colors else np.empty((0, 3)),
-            "frame_indices": frame_indices,
+            "frame_indices": np.array(pose_frame_indices, dtype=int),
         }
 
     def estimate_pose_from_matches(self, pts1, pts2, K):
@@ -130,12 +151,32 @@ class VideoSFM:
         E, mask = cv2.findEssentialMat(
             pts1, pts2, K, method=cv2.RANSAC, prob=0.999, threshold=1.0
         )
-        if E is None:
+        if E is None or mask is None:
             return None, None, None
 
-        _, R, t, mask_pose = cv2.recoverPose(E, pts1, pts2, K, mask=mask)
-        inliners = mask_pose.ravel() == 1
-        return R, t, inliners
+        mask = mask.ravel().astype(bool)
+        if mask.sum() < 8:
+            return None, None, None
+
+        # homography-vs-essential degeneracy check on inliers
+        H, mH = cv2.findHomography(
+            pts1[mask], pts2[mask],
+            cv2.RANSAC, 3.0, confidence=0.999
+        )
+        inl_F = int(mask.sum())
+        inl_H = int(mH.ravel().sum()) if mH is not None else 0
+        if inl_H >= 1.5 * inl_F:
+            return None, None, None
+
+        # Recover pose directly from E (essential matrix)
+        ok, R, t, pose_mask = cv2.recoverPose(
+            E, pts1, pts2, K, mask=mask.astype(np.uint8)
+        )
+        if not ok:
+            return None, None, None
+
+        inliers = pose_mask.ravel().astype(bool)
+        return R, t, inliers
 
     def triangulate_points(self, pts1, pts2, K, pose1, pose2):
         """
@@ -212,7 +253,16 @@ class VideoSFM:
             z2=z2,
         )
 
-        return X[mask] if mask.any() else None
+        if not mask.any():
+            return None
+
+        X_cam1 = X[mask]
+        # pose1: world-to-camera => invert to get cam-to-world
+        Twc1 = np.linalg.inv(pose1)  # 4x4
+        X_h = np.hstack([X_cam1, np.ones((X_cam1.shape[0], 1))])  # Nx4
+        X_world = (Twc1 @ X_h.T).T[:, :3]  # Nx3 in world coords
+
+        return X_world
 
     def _too_similar(self, img1, img2,
                      corr_t=0.995, mad_t=0.6, flow_px=0.6, max_corners=400):
@@ -267,7 +317,7 @@ class VideoSFM:
         proj2,
         z1,
         z2,
-        max_reproj_error=2.5,  # Unsure of this value
+        max_reproj_error=6.0,
     ):
         """
         Filters the 3D points based on reprojection error and depth
@@ -289,25 +339,7 @@ class VideoSFM:
         e2 = np.linalg.norm(proj2 - pts2, axis=1)
         reproj_ok = (e1 < max_reproj_error) & (e2 < max_reproj_error)
 
-        # Logs
-        if len(z1) > 0:
-            z1min, z1max = float(np.min(z1)), float(np.max(z1))
-        else:
-            z1min = z1max = 0.0
-        # log(INFO,
-        #     f"  Depth cheirality: {cheirality.sum()}/{len(cheirality)} points have z>0 in both views (z1 range: [{z1min:.2f}, {z1max:.2f}])")
-
-        if len(e1) > 0:
-            emin, emax = (
-                float(np.min(np.minimum(e1, e2))),
-                float(np.max(np.maximum(e1, e2))),
-            )
-        else:
-            emin = emax = 0.0
-        # log(INFO, f"  Reproj filter: {reproj_ok.sum()}/{len(reproj_ok)} pass (errors range: [{emin:.2f}, {emax:.2f}])")
-
         final_mask = cheirality & reproj_ok
-        # log(INFO, f"  Final: {final_mask.sum()}/{len(final_mask)} points pass both filters")
         return final_mask
 
 
