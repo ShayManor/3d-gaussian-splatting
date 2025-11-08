@@ -44,17 +44,19 @@ def main():
         use_cache=True
     )
 
-    print(f"Processed {len(args.videos)} videos")
-    print(f"Total 3D points: {len(merged_data['points_3d'])}")
-    print("Starting training...")
+    log(INFO, f"Processed {len(args.videos)} videos")
+    log(INFO, f"Total 3D points: {len(merged_data['points_3d'])}")
+    log(INFO, "Starting training...")
 
     trainer = GaussianTrainer(config, device=args.device)
+    log(logging.DEBUG, "MERGED all_poses[0][0]:\n", merged_data["all_poses"][0][0])
+    log(logging.DEBUG, "MERGED all_poses[0][1]:\n", merged_data["all_poses"][0][1])
     gaussians = trainer.train(merged_data, args.output)
     output_model = args.output + '/final_model.pth'
     ply_output = output_model.replace('pth', 'ply')
-    print("\n" + "=" * 60)
-    print(f"Training complete! Model saved to {output_model}, Splat saved to {ply_output}")
-    print("=" * 60)
+    log(INFO, "\n" + "=" * 60)
+    log(INFO, f"Training complete! Model saved to {output_model}, Splat saved to {ply_output}")
+    log(INFO, "=" * 60)
 
     export(output_model, ply_output)
 
