@@ -78,7 +78,13 @@ class GaussianModel(nn.Module):
             scales = self.get_scaling
             max_scale = scales.amax(dim=-1)
 
-            clone_mask = (grads_norm >= grads_threshold) & (max_scale <= extent * 0.1)
+            opacity = self.get_opacity.squeeze()
+
+            clone_mask = (
+                    (grads_norm >= grads_threshold) &
+                    (max_scale <= extent * 0.1) &
+                    (opacity > min_opacity)
+            )
             if clone_mask.sum() > 0:
                 self._clone_gaussians(clone_mask)
 
@@ -88,16 +94,28 @@ class GaussianModel(nn.Module):
             scales = self.get_scaling
             max_scale = scales.amax(dim=-1)
 
-            split_mask = (grads_norm >= grads_threshold) & (max_scale > extent * 0.1)
+            split_mask = (
+                    (grads_norm >= grads_threshold) &
+                    (max_scale > extent * 0.1) &
+                    (opacity > min_opacity)
+            )
             if split_mask.sum() > 0:
                 self._split_gaussians(split_mask)
+
+            grads = self.xyz_gradient_accum / (self.xyz_gradient_count + 1e-8)
+            grads_norm = torch.norm(grads, dim=-1)
 
             # Prune low opacity gaussians
             scales = self.get_scaling
             max_scale = scales.amax(dim=-1)
-            prune_mask = (self.get_opacity < min_opacity).squeeze()
-            big_points_mask = max_scale > extent / 2
-            prune_mask = prune_mask | big_points_mask
+            opacity = self.get_opacity.squeeze()
+
+            # only kill gaussians that are BOTH dark and unused
+            low_op = opacity < min_opacity
+            low_grad = grads_norm < grads_threshold
+            too_big = max_scale > extent * 2.0  # true outliers only
+
+            prune_mask = (low_op & low_grad) | too_big
 
             if prune_mask.sum() > 0:
                 self._prune_gaussians(~prune_mask)  # not operator because prune removes
@@ -111,43 +129,68 @@ class GaussianModel(nn.Module):
         Clones the masked gaussians
         :param mask: The given mask
         """
-        new_xyz = self.xyz[mask]
-        new_features_dc = self.features_dc[mask]
-        new_features_rest = self.features_rest[mask]
-        new_opacity = self.opacity[mask]
-        new_scaling = self.scaling[mask]
-        new_rotation = self.rotation[mask]
+        # mask can be bool or Long indices
+        if mask.dtype == torch.bool:
+            idx = mask.nonzero(as_tuple=False).view(-1)
+        else:
+            idx = mask
+        if idx.numel() == 0:
+            return
+        new_xyz = self.xyz[idx]
+        new_features_dc = self.features_dc[idx]
+        new_features_rest = self.features_rest[idx]
+        new_opacity = self.opacity[idx]
+        new_scaling = self.scaling[idx]
+        new_rotation = self.rotation[idx]
 
-        self.densify(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
+        self.densify(new_xyz, new_features_dc, new_features_rest,
+                     new_opacity, new_scaling, new_rotation)
 
     def _split_gaussians(self, mask):
         """
         Splits large gaussians / high gradients into smaller ones
         :param mask: Mask for which to split
         """
+        # mask can be bool or Long indices
+        if mask.dtype == torch.bool:
+            idx = mask.nonzero(as_tuple=False).view(-1)
+        else:
+            idx = mask
+
+        if idx.numel() == 0:
+            return
+
         n_splits = 2
 
         # Get Gaussians to split
-        xyz = self.xyz[mask]
-        features_dc = self.features_dc[mask].repeat(n_splits, 1, 1)
-        features_rest = self.features_rest[mask].repeat(n_splits, 1, 1)
-        opacity = self.opacity[mask].repeat(n_splits, 1)
-        scaling = self.scaling[mask].repeat(n_splits, 1)
-        rotation = self.rotation[mask].repeat(n_splits, 1)
+        xyz = self.xyz[idx]
+        features_dc = self.features_dc[idx].repeat(n_splits, 1, 1)
+        features_rest = self.features_rest[idx].repeat(n_splits, 1, 1)
+        opacity = self.opacity[idx].repeat(n_splits, 1)
+        scaling = self.scaling[idx].repeat(n_splits, 1)
+        rotation = self.rotation[idx].repeat(n_splits, 1)
 
         # Reduces scaling and adds noise to positions to remove. 1.6 was used by others (plagiarized)
         scaling = scaling - torch.log(torch.tensor(1.6, device=scaling.device))
 
-        scales = self.get_scaling[mask].repeat(n_splits, 1)
+        # scales = self.get_scaling[mask].repeat(n_splits, 1)
         # rotations = self.get_rotation[mask].repeat(n_splits, 1)
+        scales = torch.exp(scaling)
 
         # Samples by creating a new random normal tensor in the same shape repeated
         samples = torch.randn_like(xyz.repeat(n_splits, 1)) * scales[:, :3]
-        xyz = xyz.repeat(n_splits, 1) + samples
+        new_xyz = xyz.repeat(n_splits, 1) + samples
+
+        keep_mask = torch.ones(self.xyz.shape[0], dtype=torch.bool,
+                               device=self.xyz.device)
+        keep_mask[idx] = False
+        self._prune_gaussians(keep_mask)
 
         # Remove original
-        self._prune_gaussians(~mask)
-        self.densify(xyz, features_dc, features_rest, opacity, scaling, rotation)
+        # self._prune_gaussians(~mask)
+        # self.densify(xyz, features_dc, features_rest, opacity, scaling, rotation)
+        self.densify(new_xyz, features_dc, features_rest,
+                     opacity, scaling, rotation)
 
     def _prune_gaussians(self, keep_mask):
         """
