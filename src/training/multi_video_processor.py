@@ -111,7 +111,7 @@ class MultiVideoProcessor:
             ],
         }
 
-        if (video_data_list[0] == 1):
+        if len(video_data_list) == 1:
             return merged
 
 
