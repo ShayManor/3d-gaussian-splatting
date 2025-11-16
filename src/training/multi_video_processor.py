@@ -64,7 +64,9 @@ class MultiVideoProcessor:
         :param stride: Stride (sampling amount)
         :return: Processes SFM video
         """
-        loader = VideoLoader(video_path, self.use_cache)
+
+        ### Opencv2 video capture ###
+        loader = VideoLoader(video_path, self.use_cache) 
         processor = VideoSFM(self.device, matcher=matcher)
 
         num_frames = min(loader.total_frames, self.max_frames_per_video)
@@ -96,6 +98,7 @@ class MultiVideoProcessor:
         :param video_data_list:
         :return: Merged video features
         """
+        
         merged = {
             "points_3d": video_data_list[0]["points_3d"],
             "colors": video_data_list[0]["colors"],

@@ -44,8 +44,6 @@ def main():
         use_cache=True
     )
 
-    print(merged_data)
-
     log(INFO, f"Processed {len(args.videos)} videos")
     log(INFO, f"Total 3D points: {len(merged_data['points_3d'])}")
     # log(INFO, "Starting training...")

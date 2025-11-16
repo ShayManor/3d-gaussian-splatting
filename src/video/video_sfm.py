@@ -14,8 +14,8 @@ class VideoSFM:
     """
 
     def __init__(self, device="cuda", matcher="opencv"):
-        self.extractor = SuperPoint().eval().to(device)  # More robust to changes
-        self.matcher = LightGlue(features="superpoint").eval().to(device)
+        self.extractor = SuperPoint(max_num_keypoints=None).eval().to(device)  # More robust to changes
+        self.matcher = LightGlue(features="superpoint", depth_confidence=-1, width_confidence=-1).eval().to(device)
         self.calibrator = Calibrator(matcher)
 
 

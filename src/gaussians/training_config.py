@@ -14,20 +14,20 @@ class TrainingConfig:
     matcher: str = "opencv"  # opencv or loftr
 
     # Gaussians
-    initial_gaussians: int = 1e5
-    max_gaussians: int = 5e6
+    initial_gaussians: int = int(1e5)
+    max_gaussians: int = int(5e6)
     densify_interval: int = 500
     prune_interval: int = 2000
     opacity_reset_interval: int = 5000
 
     # Training config
-    iterations_per_video: int = 3e5
+    iterations_per_video: int = int(3e5)
     batch_size: int = 4
     lr: float = 0.001
-    position_lr_init: float = 0.00016
-    position_lr_final: float = 0.00000016
+    position_lr_init: float = 1.6e-4
+    position_lr_final: float = 1.6e-7
     position_lr_delay_mult: float = 0.01
-    position_lr_max_steps: int = 3e5
+    position_lr_max_steps: int = int(3e5)
 
     # GPU Optimizations
     use_mixed_precision: bool = True
