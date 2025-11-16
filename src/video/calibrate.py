@@ -111,10 +111,14 @@ class Calibrator:
         with torch.no_grad():
             input_dict = {"image0": img1_gray, "image1": img2_gray}
             correspondences = self.loftr(input_dict)
-
-            mkpts0 = correspondences["keypoints0"].cpu().numpy()
-            mkpts1 = correspondences["keypoints1"].cpu().numpy()
-            confidence = correspondences["confidence"].cpu().numpy()
+            if not torch.cuda.is_available():
+                mkpts0 = correspondences["keypoints0"].cpu().numpy()
+                mkpts1 = correspondences["keypoints1"].cpu().numpy()
+                confidence = correspondences["confidence"].cpu().numpy()
+            else:
+                mkpts0 = correspondences["keypoints0"].cuda()
+                mkpts1 = correspondences["keypoints1"].cuda()
+                confidence = correspondences["confidence"].cuda()
 
             # Filter by confidence
             mask = confidence > 0.5
