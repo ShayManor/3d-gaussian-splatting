@@ -46,19 +46,19 @@ def main():
 
     log(INFO, f"Processed {len(args.videos)} videos")
     log(INFO, f"Total 3D points: {len(merged_data['points_3d'])}")
-    # log(INFO, "Starting training...")
+    log(INFO, "Starting training...")
 
-    # trainer = GaussianTrainer(config, device=args.device)
-    # log(logging.DEBUG, "MERGED all_poses[0][0]:\n", merged_data["all_poses"][0][0])
-    # log(logging.DEBUG, "MERGED all_poses[0][1]:\n", merged_data["all_poses"][0][1])
-    # gaussians = trainer.train(merged_data, args.output)
-    # output_model = args.output + '/final_model.pth'
-    # ply_output = output_model.replace('pth', 'ply')
-    # log(INFO, "\n" + "=" * 60)
-    # log(INFO, f"Training complete! Model saved to {output_model}, Splat saved to {ply_output}")
-    # log(INFO, "=" * 60)
+    trainer = GaussianTrainer(config, device=args.device)
+    log(logging.DEBUG, "MERGED all_poses[0][0]:\n", merged_data["all_poses"][0][0])
+    log(logging.DEBUG, "MERGED all_poses[0][1]:\n", merged_data["all_poses"][0][1])
+    gaussians = trainer.train(merged_data, args.output)
+    output_model = args.output + '/final_model.pth'
+    ply_output = output_model.replace('pth', 'ply')
+    log(INFO, "\n" + "=" * 60)
+    log(INFO, f"Training complete! Model saved to {output_model}, Splat saved to {ply_output}")
+    log(INFO, "=" * 60)
 
-    # export(output_model, ply_output)
+    export(output_model, ply_output)
 
 
 if __name__ == "__main__":

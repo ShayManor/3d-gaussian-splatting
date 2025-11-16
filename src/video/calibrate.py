@@ -43,9 +43,12 @@ class Calibrator:
         all_matches = []
         for i in range(len(frames) - 1):
             if self.matcher_type == "opencv":
-                pts1, pts2 = self.match_with_opencv(frame[i], frame[i + 1])
+                pts1, pts2 = self.match_with_opencv(frames[i], frames[i + 1])
             else:
                 pts1, pts2 = self.match_with_loftr(frames[i], frames[i + 1])
+
+            if any(obj is None for obj in (pts1, pts2)):
+                continue
 
             all_matches.append(
                 {"frame_i": i, "frame_j": i + 1, "pts1": pts1, "pts2": pts2}
@@ -69,7 +72,7 @@ class Calibrator:
 
         if any((obj is None) or (len(obj) == 0) for obj in (des1, des2)):
             log(WARNING, "Error in matching! - Skipping")
-            continue
+            return None, None
 
         matches = self.matcher.knnMatch(des1, des2, k=2)
 
@@ -85,7 +88,7 @@ class Calibrator:
 
         if len(good_matches) < 20:
             log(WARNING, f"Few good matches ({len(good_matches)}) - Skipping")
-            continue
+            return None, None
 
         pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
         pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
@@ -122,10 +125,14 @@ class Calibrator:
         with torch.no_grad():
             input_dict = {"image0": img1_gray, "image1": img2_gray}
             correspondences = self.loftr(input_dict)
-
-            mkpts0 = correspondences["keypoints0"].cpu().numpy()
-            mkpts1 = correspondences["keypoints1"].cpu().numpy()
-            confidence = correspondences["confidence"].cpu().numpy()
+            if not torch.cuda.is_available():
+                mkpts0 = correspondences["keypoints0"].cpu().numpy()
+                mkpts1 = correspondences["keypoints1"].cpu().numpy()
+                confidence = correspondences["confidence"].cpu().numpy()
+            else:
+                mkpts0 = correspondences["keypoints0"].cuda()
+                mkpts1 = correspondences["keypoints1"].cuda()
+                confidence = correspondences["confidence"].cuda()
 
             # Filter by confidence
             mask = confidence > 0.5
