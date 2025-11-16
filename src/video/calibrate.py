@@ -72,7 +72,11 @@ class Calibrator:
 
         if any((obj is None) or (len(obj) == 0) for obj in (des1, des2)):
             log(WARNING, "Error in matching! - Skipping")
+<<<<<<< HEAD
             return None, None
+=======
+            continue
+>>>>>>> d9a8914 (Improvements to code base, small adjustments of some parameters)
 
         matches = self.matcher.knnMatch(des1, des2, k=2)
 
@@ -88,7 +92,11 @@ class Calibrator:
 
         if len(good_matches) < 20:
             log(WARNING, f"Few good matches ({len(good_matches)}) - Skipping")
+<<<<<<< HEAD
             return None, None
+=======
+            continue
+>>>>>>> d9a8914 (Improvements to code base, small adjustments of some parameters)
 
         pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
         pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
