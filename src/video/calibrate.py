@@ -47,7 +47,7 @@ class Calibrator:
             else:
                 pts1, pts2 = self.match_with_loftr(frames[i], frames[i + 1])
 
-            if any(obj is None for obj in (pts1, pts2)):
+            if any((obj is None) or (not isinstance(obj, np.ndarray)) for obj in (pts1, pts2)):
                 continue
 
             all_matches.append(
@@ -55,7 +55,7 @@ class Calibrator:
             )
         return all_matches
 
-    def match_with_opencv(self, frame1, frame2):
+    def match_with_opencv(self, frame1, frame2, threshold=0.7, num_matches=20):
         """
         Extracts all matches from video,
         mostly intended to adjust camera intrinsics
@@ -83,10 +83,10 @@ class Calibrator:
         for match_pair in matches:
             if len(match_pair) == 2:
                 m, n = match_pair
-                if m.distance < 0.7 * n.distance:
+                if m.distance < threshold * n.distance:
                     good_matches.append(m)
 
-        if len(good_matches) < 20:
+        if len(good_matches) < num_matches:
             log(WARNING, f"Few good matches ({len(good_matches)}) - Skipping")
             return None, None
 

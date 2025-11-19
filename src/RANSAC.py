@@ -12,7 +12,6 @@ import cv2
 from src.video.calibrate import Calibrator
 from src.video.video_loader import VideoLoader
 
-
 def _align_video_to_reference(video_data: Dict, reference: Dict) -> Dict:
     """
     Align a video to the reference coordinate system using robust feature matching and RANSAC
@@ -51,34 +50,16 @@ def _align_video_to_reference(video_data: Dict, reference: Dict) -> Dict:
             if new_frame is None:
                 continue
 
-            # Match features between frames
             if calibrator.matcher_type == "loftr":
                 pts1, pts2 = calibrator.match_with_loftr(ref_frame, new_frame)
             else:
-                # Use OpenCV matching
-                gray1 = cv2.cvtColor(ref_frame, cv2.COLOR_BGR2GRAY)
-                gray2 = cv2.cvtColor(new_frame, cv2.COLOR_BGR2GRAY)
+                pts1, pts2 = calibrator.match_with_opencv(ref_frame, new_frame, threshold=0.75, num_matches=30)
 
-                kp1, des1 = calibrator.alg.detectAndCompute(gray1, None)
-                kp2, des2 = calibrator.alg.detectAndCompute(gray2, None)
+            if any(obj is None for obj in (pts1, pts2)):
+                continue
 
-                if des1 is None or des2 is None:
-                    continue
-
-                matches = calibrator.matcher.knnMatch(des1, des2, k=2)
-
-                good_matches = []
-                for match_pair in matches:
-                    if len(match_pair) == 2:
-                        m, n = match_pair
-                        if m.distance < 0.75 * n.distance:
-                            good_matches.append(m)
-
-                if len(good_matches) < 30:
-                    continue
-
-                pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
-                pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
+            if not isinstance(pts1, np.ndarray) or not isinstance(pts2, np.ndarray):
+                continue
 
             if len(pts1) > 30:
                 best_matches.append((pts1, pts2))
