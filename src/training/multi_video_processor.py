@@ -64,7 +64,9 @@ class MultiVideoProcessor:
         :param stride: Stride (sampling amount)
         :return: Processes SFM video
         """
-        loader = VideoLoader(video_path, self.use_cache)
+
+        ### Opencv2 video capture ###
+        loader = VideoLoader(video_path, self.use_cache) 
         processor = VideoSFM(self.device, matcher=matcher)
 
         num_frames = min(loader.total_frames, self.max_frames_per_video)
@@ -96,24 +98,7 @@ class MultiVideoProcessor:
         :param video_data_list:
         :return: Merged video features
         """
-        if len(video_data_list) == 1:
-            # Single video
-            video = video_data_list[0]
-            return {
-                "points_3d": video["points_3d"],
-                "colors": video["colors"],
-                "all_poses": [video["poses"]],
-                "all_intrinsics": [video["intrinsics"]],
-                "frame_indices": [video["frame_indices"]],
-                "video_info": [
-                    {
-                        "path": video["video_path"],
-                        "fps": video["fps"],
-                        "num_frames": len(video["poses"]),
-                    }
-                ],
-            }
-
+        
         merged = {
             "points_3d": video_data_list[0]["points_3d"],
             "colors": video_data_list[0]["colors"],
@@ -128,6 +113,10 @@ class MultiVideoProcessor:
                 }
             ],
         }
+
+        if len(video_data_list) == 1:
+            return merged
+
 
         # Align and merge videos
         for i in range(1, len(video_data_list)):

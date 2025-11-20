@@ -43,43 +43,57 @@ class Calibrator:
         all_matches = []
         for i in range(len(frames) - 1):
             if self.matcher_type == "opencv":
-                gray1 = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY)
-                gray2 = cv2.cvtColor(frames[i + 1], cv2.COLOR_BGR2GRAY)
-
-                # Detect + compute
-                kp1, des1 = self.alg.detectAndCompute(gray1, None)
-                kp2, des2 = self.alg.detectAndCompute(gray2, None)
-
-                if des1 is None or des2 is None or len(des1) == 0 or len(des2) == 0:
-                    log(WARNING, "Error in matching! - Skipping")
-                    continue
-
-                matches = self.matcher.knnMatch(des1, des2, k=2)
-
-                # Lowe's ratio test
-                # https://sites.cc.gatech.edu/classes/AY2016/cs4476_fall/results/proj2/html/sshah426/index.html
-                # High ratio means clear match
-                good_matches = []
-                for match_pair in matches:
-                    if len(match_pair) == 2:
-                        m, n = match_pair
-                        if m.distance < 0.7 * n.distance:
-                            good_matches.append(m)
-
-                if len(good_matches) < 20:
-                    log(WARNING, f"Few good matches ({len(good_matches)}) - Skipping")
-                    continue
-
-                pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
-                pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
-
-            else:  # LoFTR matching
+                pts1, pts2 = self.match_with_opencv(frames[i], frames[i + 1])
+            else:
                 pts1, pts2 = self.match_with_loftr(frames[i], frames[i + 1])
+
+            if any((obj is None) or (not isinstance(obj, np.ndarray)) for obj in (pts1, pts2)):
+                continue
 
             all_matches.append(
                 {"frame_i": i, "frame_j": i + 1, "pts1": pts1, "pts2": pts2}
             )
         return all_matches
+
+    def match_with_opencv(self, frame1, frame2, threshold=0.7, num_matches=20):
+        """
+        Extracts all matches from video,
+        mostly intended to adjust camera intrinsics
+        :param frame1: first frame
+        :param frame2: second frame
+        :return: matching points
+        """
+        gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+
+        # Detect + compute
+        kp1, des1 = self.alg.detectAndCompute(gray1, None)
+        kp2, des2 = self.alg.detectAndCompute(gray2, None)
+
+        if any((obj is None) or (len(obj) == 0) for obj in (des1, des2)):
+            log(WARNING, "Error in matching! - Skipping")
+            return None, None
+
+        matches = self.matcher.knnMatch(des1, des2, k=2)
+
+        # Lowe's ratio test
+        # https://sites.cc.gatech.edu/classes/AY2016/cs4476_fall/results/proj2/html/sshah426/index.html
+        # High ratio means clear match
+        good_matches = []
+        for match_pair in matches:
+            if len(match_pair) == 2:
+                m, n = match_pair
+                if m.distance < threshold * n.distance:
+                    good_matches.append(m)
+
+        if len(good_matches) < num_matches:
+            log(WARNING, f"Few good matches ({len(good_matches)}) - Skipping")
+            return None, None
+
+        pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches])
+        pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches])
+
+        return pts1, pts2
 
     def match_with_loftr(self, img1, img2):
         """

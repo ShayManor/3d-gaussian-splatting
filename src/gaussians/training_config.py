@@ -24,8 +24,8 @@ class TrainingConfig:
     iterations_per_video: int = 3e5
     batch_size: int = 4
     lr: float = 0.001
-    position_lr_init: float = 0.00016
-    position_lr_final: float = 0.00000016
+    position_lr_init: float = 1.6e-4
+    position_lr_final: float = 1.6e-7
     position_lr_delay_mult: float = 0.01
     position_lr_max_steps: int = 3e5
 
