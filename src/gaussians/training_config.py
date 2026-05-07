@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List, Optional
 
 
 @dataclass
@@ -43,3 +44,21 @@ class TrainingConfig:
     lambda_dssim: float = 0.2
     lambda_depth: float = 0.1
     lambda_normal: float = 0.05
+
+    # Logging / validation
+    log_scalar_interval: int = 10       # log loss/lr/n_gauss every N iters
+    log_gpu_interval: int = 200         # log gpu memory every N iters
+    log_image_interval: int = 2000      # log a sample render every N iters
+    log_hist_interval: int = 5000       # log opacity/scale histograms every N iters
+    val_interval: int = 1000            # run validation every N iters
+    val_fraction: float = 0.1           # held-out view fraction (capped by val_max_views)
+    val_max_views: int = 16
+    val_seed: int = 42                  # deterministic train/val split
+    checkpoint_interval: int = 10000
+
+    # W&B
+    wandb_project: str = "3d-gaussian-splatting"
+    wandb_entity: Optional[str] = None
+    wandb_mode: str = "online"          # online | offline | disabled
+    wandb_run_name: Optional[str] = None
+    wandb_tags: Optional[List[str]] = None

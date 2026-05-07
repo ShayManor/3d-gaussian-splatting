@@ -68,8 +68,15 @@ class GaussianModel(nn.Module):
         max_screen_size: float,
     ):
         """
-        Densifies and prunes low-opacity gaussians
+        Densifies and prunes low-opacity gaussians.
+        Returns a dict of event counts (cloned/split/pruned) and population sizes.
         """
+        stats = {
+            "cloned": 0,
+            "split": 0,
+            "pruned": 0,
+            "n_before": int(self.xyz.shape[0]),
+        }
         with torch.no_grad():
             grads = self.xyz_gradient_accum / (self.xyz_gradient_count + 1e-8)
             grads_norm = torch.norm(grads, dim=-1)
@@ -86,6 +93,7 @@ class GaussianModel(nn.Module):
                     (opacity > min_opacity)
             )
             if clone_mask.sum() > 0:
+                stats["cloned"] = int(clone_mask.sum().item())
                 self._clone_gaussians(clone_mask)
 
             # Split large gaussians (high gradients and large)
@@ -100,6 +108,7 @@ class GaussianModel(nn.Module):
                     (opacity > min_opacity)
             )
             if split_mask.sum() > 0:
+                stats["split"] = int(split_mask.sum().item())
                 self._split_gaussians(split_mask)
 
             grads = self.xyz_gradient_accum / (self.xyz_gradient_count + 1e-8)
@@ -118,11 +127,15 @@ class GaussianModel(nn.Module):
             prune_mask = (low_op & low_grad) | too_big
 
             if prune_mask.sum() > 0:
+                stats["pruned"] = int(prune_mask.sum().item())
                 self._prune_gaussians(~prune_mask)  # not operator because prune removes
 
             # Reset gradients
             self.xyz_gradient_count.zero_()
             self.xyz_gradient_accum.zero_()
+
+        stats["n_after"] = int(self.xyz.shape[0])
+        return stats
 
     def _clone_gaussians(self, mask):
         """
