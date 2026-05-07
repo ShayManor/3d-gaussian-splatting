@@ -3,6 +3,8 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# cache
+cache/
 # C extensions
 *.so
 
@@ -205,3 +207,5 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+debug_reproj_points
