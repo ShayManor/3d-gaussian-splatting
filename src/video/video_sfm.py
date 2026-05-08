@@ -28,6 +28,11 @@ class VideoSFM:
         drift across pairs. New world points are triangulated using the PnP-recovered
         absolute pose for the current frame and the previous accepted pose.
         """
+        # Environment probe: surface anything obviously wrong (no SIFT support,
+        # blank frames, dtype mismatch) before we run 521 pairs and report 0
+        # matches with no actionable signal. Runs once.
+        self._log_environment_probe(frames)
+
         K = self.calibrator.identify_intrinsics(
             frames[: min(50, len(frames))], video_path
         )
@@ -81,6 +86,10 @@ class VideoSFM:
         TRACK_RADIUS_PX = 6.0
         MAX_REPROJ_PX = 2.0
 
+        # Diagnostic: collect raw match counts so the user can see the actual
+        # distribution when most pairs fail.
+        match_counts = []
+
         for i, frame_idx in enumerate(
             tqdm(frame_indices[1:], total=len(frame_indices) - 1, desc="Processing pairs"), 1
         ):
@@ -91,7 +100,9 @@ class VideoSFM:
             matches = self.calibrator.extract_all_matches(
                 [frames[prev_frame_idx], frames[frame_idx]]
             )
-            if not matches or len(matches[0]["pts1"]) < MIN_MATCHES:
+            n_match = len(matches[0]["pts1"]) if matches else 0
+            match_counts.append(n_match)
+            if n_match < MIN_MATCHES:
                 skips["few_matches"] += 1
                 continue
 
@@ -250,6 +261,15 @@ class VideoSFM:
             breakdown = ", ".join(f"{k}={v}" for k, v in skips.items() if v > 0)
             level = WARNING if (len(poses) < 2 or n_skipped > 0.5 * n_candidates) else INFO
             log(level, f"Skip breakdown: {breakdown}")
+        if match_counts:
+            mc = np.array(match_counts)
+            log(
+                INFO,
+                f"Match count distribution over {len(mc)} attempted pairs: "
+                f"min={mc.min()} p25={int(np.percentile(mc,25))} "
+                f"median={int(np.median(mc))} p75={int(np.percentile(mc,75))} "
+                f"max={mc.max()} (gate MIN_MATCHES=8)",
+            )
 
         poses_arr = np.array(poses)
         return {
@@ -259,6 +279,59 @@ class VideoSFM:
             "colors": np.array(point_colors) if point_colors else np.empty((0, 3)),
             "frame_indices": np.array(pose_frame_indices, dtype=int),
         }
+
+    def _log_environment_probe(self, frames):
+        """
+        Print diagnostics that quickly distinguish "thresholds need tuning" from
+        "OpenCV/SIFT is broken" or "frames decoded wrong". Runs once per call.
+        """
+        if not frames:
+            log(WARNING, "[probe] no frames passed to process_video_frames")
+            return
+
+        f0 = frames[0]
+        log(
+            INFO,
+            f"[probe] OpenCV {cv2.__version__}  matcher_type={self.calibrator.matcher_type}  "
+            f"frame[0] shape={f0.shape} dtype={f0.dtype} mean={float(f0.mean()):.1f} std={float(f0.std()):.1f}",
+        )
+
+        # Try SIFT detection directly on a couple of frames to confirm it works.
+        # If 0 keypoints come back, the cause is upstream of the matcher
+        # (SIFT not built into this OpenCV, frames blank, etc.).
+        if self.calibrator.matcher_type in ("sift", "opencv") and self.calibrator.alg is not None:
+            try:
+                gray0 = cv2.cvtColor(f0, cv2.COLOR_BGR2GRAY)
+                kp0, des0 = self.calibrator.alg.detectAndCompute(gray0, None)
+                n_kp0 = 0 if kp0 is None else len(kp0)
+                des_shape = None if des0 is None else des0.shape
+                log(
+                    INFO,
+                    f"[probe] {self.calibrator.matcher_type} on frame[0]: "
+                    f"keypoints={n_kp0}, des shape={des_shape}",
+                )
+
+                # Pair-test against a frame ~5% into the list to confirm matching works.
+                if len(frames) > 1:
+                    j = min(len(frames) - 1, max(1, len(frames) // 20))
+                    f1 = frames[j]
+                    gray1 = cv2.cvtColor(f1, cv2.COLOR_BGR2GRAY)
+                    kp1, des1 = self.calibrator.alg.detectAndCompute(gray1, None)
+                    n_kp1 = 0 if kp1 is None else len(kp1)
+                    if des0 is not None and des1 is not None and n_kp0 > 0 and n_kp1 > 0:
+                        raw = self.calibrator.matcher.knnMatch(des0, des1, k=2)
+                        n_ratio = sum(
+                            1 for p in raw if len(p) == 2 and p[0].distance < 0.75 * p[1].distance
+                        )
+                        log(
+                            INFO,
+                            f"[probe] frame[0] vs frame[{j}]: kp1={n_kp1}, "
+                            f"raw knn={len(raw)}, ratio<0.75 = {n_ratio}",
+                        )
+                    else:
+                        log(WARNING, f"[probe] frame[0] vs frame[{j}]: cannot match (kp1={n_kp1})")
+            except Exception as e:
+                log(WARNING, f"[probe] detector test raised {type(e).__name__}: {e}")
 
     def _triangulate_pair(self, pts1, pts2, K, pose1, pose2, max_reproj_error):
         """
