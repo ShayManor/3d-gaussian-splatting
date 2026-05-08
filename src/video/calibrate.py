@@ -117,11 +117,10 @@ class Calibrator:
 
     def match_with_loftr(self, img1, img2):
         """
-        Uses LoFTR matching (much better than OpenCV) to get matches.
-        Runs on GPU
-        :param img1: First image
-        :param img2: Second image
-        :return: matching points
+        Run kornia LoFTR on a pair and return matched pixel coords as **numpy
+        ndarrays**. Always returns numpy regardless of device — the downstream
+        SfM code (`extract_all_matches`) filters with `isinstance(.., np.ndarray)`
+        so torch tensors get silently dropped.
         """
         import kornia as K
 
@@ -130,39 +129,26 @@ class Calibrator:
         img1_t = K.image_to_tensor(img1).float() / 255.0
         img2_t = K.image_to_tensor(img2).float() / 255.0
 
-        if len(img1_t.shape) == 3:
+        if img1_t.dim() == 3:
             img1_t = img1_t.unsqueeze(0)
             img2_t = img2_t.unsqueeze(0)
 
-        # Grayscale
-        if torch.cuda.is_available():
-            img1_gray = K.color.rgb_to_grayscale(img1_t).cuda()
-            img2_gray = K.color.rgb_to_grayscale(img2_t).cuda()
-        else:
-            img1_gray = K.color.rgb_to_grayscale(img1_t)
-            img2_gray = K.color.rgb_to_grayscale(img2_t)
+        img1_gray = K.color.rgb_to_grayscale(img1_t)
+        img2_gray = K.color.rgb_to_grayscale(img2_t)
+
+        device = next(self.loftr.parameters()).device
+        img1_gray = img1_gray.to(device)
+        img2_gray = img2_gray.to(device)
 
         with torch.no_grad():
-            input_dict = {"image0": img1_gray, "image1": img2_gray}
-            correspondences = self.loftr(input_dict)
-            if not torch.cuda.is_available():
-                mkpts0 = correspondences["keypoints0"].cpu().numpy()
-                mkpts1 = correspondences["keypoints1"].cpu().numpy()
-                confidence = correspondences["confidence"].cpu().numpy()
-            else:
-                mkpts0 = correspondences["keypoints0"].cuda()
-                mkpts1 = correspondences["keypoints1"].cuda()
-                confidence = correspondences["confidence"].cuda()
+            correspondences = self.loftr({"image0": img1_gray, "image1": img2_gray})
 
-            # Filter by confidence
-            mask = confidence > 0.5
-            # flow = np.linalg.norm(mkpts1 - mkpts0, axis=1)
-            # mask = mask & (flow >= 1.0)  # keep real motion; tune 0.8–1.5
+        mkpts0 = correspondences["keypoints0"].detach().cpu().numpy()
+        mkpts1 = correspondences["keypoints1"].detach().cpu().numpy()
+        confidence = correspondences["confidence"].detach().cpu().numpy()
 
-            mkpts0 = mkpts0[mask]
-            mkpts1 = mkpts1[mask]
-
-        return mkpts0, mkpts1
+        mask = confidence > 0.5
+        return mkpts0[mask], mkpts1[mask]
 
     def refine_with_bundle_adjustment(self, matches, K_init):
         """

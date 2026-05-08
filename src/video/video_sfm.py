@@ -283,7 +283,7 @@ class VideoSFM:
     def _log_environment_probe(self, frames):
         """
         Print diagnostics that quickly distinguish "thresholds need tuning" from
-        "OpenCV/SIFT is broken" or "frames decoded wrong". Runs once per call.
+        "OpenCV/matcher is broken" or "frames decoded wrong". Runs once per call.
         """
         if not frames:
             log(WARNING, "[probe] no frames passed to process_video_frames")
@@ -296,9 +296,9 @@ class VideoSFM:
             f"frame[0] shape={f0.shape} dtype={f0.dtype} mean={float(f0.mean()):.1f} std={float(f0.std()):.1f}",
         )
 
-        # Try SIFT detection directly on a couple of frames to confirm it works.
-        # If 0 keypoints come back, the cause is upstream of the matcher
-        # (SIFT not built into this OpenCV, frames blank, etc.).
+        # Pick a second frame ~5% in for the pair-test.
+        j = min(len(frames) - 1, max(1, len(frames) // 20)) if len(frames) > 1 else None
+
         if self.calibrator.matcher_type in ("sift", "opencv") and self.calibrator.alg is not None:
             try:
                 gray0 = cv2.cvtColor(f0, cv2.COLOR_BGR2GRAY)
@@ -310,12 +310,8 @@ class VideoSFM:
                     f"[probe] {self.calibrator.matcher_type} on frame[0]: "
                     f"keypoints={n_kp0}, des shape={des_shape}",
                 )
-
-                # Pair-test against a frame ~5% into the list to confirm matching works.
-                if len(frames) > 1:
-                    j = min(len(frames) - 1, max(1, len(frames) // 20))
-                    f1 = frames[j]
-                    gray1 = cv2.cvtColor(f1, cv2.COLOR_BGR2GRAY)
+                if j is not None:
+                    gray1 = cv2.cvtColor(frames[j], cv2.COLOR_BGR2GRAY)
                     kp1, des1 = self.calibrator.alg.detectAndCompute(gray1, None)
                     n_kp1 = 0 if kp1 is None else len(kp1)
                     if des0 is not None and des1 is not None and n_kp0 > 0 and n_kp1 > 0:
@@ -332,6 +328,19 @@ class VideoSFM:
                         log(WARNING, f"[probe] frame[0] vs frame[{j}]: cannot match (kp1={n_kp1})")
             except Exception as e:
                 log(WARNING, f"[probe] detector test raised {type(e).__name__}: {e}")
+
+        elif self.calibrator.matcher_type == "loftr" and j is not None:
+            try:
+                pts0, pts1 = self.calibrator.match_with_loftr(f0, frames[j])
+                t0 = type(pts0).__name__
+                shape0 = getattr(pts0, "shape", None)
+                log(
+                    INFO,
+                    f"[probe] LoFTR frame[0] vs frame[{j}]: "
+                    f"return_type={t0} shape={shape0} n_matches={(0 if pts0 is None else len(pts0))}",
+                )
+            except Exception as e:
+                log(WARNING, f"[probe] LoFTR test raised {type(e).__name__}: {e}")
 
     def _triangulate_pair(self, pts1, pts2, K, pose1, pose2, max_reproj_error):
         """
