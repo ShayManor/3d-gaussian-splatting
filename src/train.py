@@ -43,7 +43,7 @@ def main():
     parser.add_argument("--iterations", type=int, default=300000, help="Training iterations")
     parser.add_argument("--distributed", type=bool, default=False)
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training")
-    parser.add_argument("--matcher", type=str, default="opencv", help="Matcher: opencv | loftr")
+    parser.add_argument("--matcher", type=str, default="sift", help="Matcher: sift | loftr | opencv")
 
     # W&B flags
     parser.add_argument("--wandb_project", default="3d-gaussian-splatting")

@@ -6,7 +6,7 @@ from logging import log, INFO, WARNING
 
 
 class Calibrator:
-    def __init__(self, matcher="opencv"):
+    def __init__(self, matcher="sift"):
         """
         Initializes camera calibrator with matcher type
         :param matcher: Uses loftr if available, otherwise OpenCV
@@ -20,19 +20,37 @@ class Calibrator:
 
     def setup_matcher(self):
         """
-        Initializes feature matches.
-        """
-        try:
-            import kornia.feature as KF
+        Initialize the requested feature matcher.
 
-            self.matcher_type = "loftr"
-            self.loftr = KF.LoFTR(pretrained="outdoor").eval()
-            if torch.cuda.is_available():
-                self.loftr = self.loftr.cuda()
-        except ImportError:
-            self.matcher_type = "opencv"
-            self.alg = cv2.ORB.create(nfeatures=3000, scoreType=cv2.ORB_HARRIS_SCORE, fastThreshold=20)
-            self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        Honors `self.matcher_type` set in __init__:
+          - "sift"   : OpenCV SIFT (corner-based, no GPU) — RECOMMENDED.
+          - "loftr"  : kornia LoFTR (dense grid). Falls back to SIFT on ImportError.
+          - "opencv" : ORB descriptor + Lowe ratio. Weak on tiny images; kept for tests.
+        """
+        if self.matcher_type == "loftr":
+            try:
+                import kornia.feature as KF
+
+                model = KF.LoFTR(pretrained="outdoor")
+                model.eval()
+                self.loftr = model
+                if torch.cuda.is_available():
+                    self.loftr = self.loftr.cuda()
+                return
+            except ImportError:
+                log(WARNING, "LoFTR requested but kornia is unavailable; falling back to SIFT")
+                self.matcher_type = "sift"
+
+        if self.matcher_type == "sift":
+            self.alg = cv2.SIFT.create(nfeatures=600, contrastThreshold=0.01, edgeThreshold=20)
+            self.matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
+            return
+
+        # ORB fallback (matcher_type == "opencv")
+        self.alg = cv2.ORB.create(nfeatures=3000, scoreType=cv2.ORB_HARRIS_SCORE, fastThreshold=20)
+        # crossCheck must stay off — match_with_opencv runs Lowe's ratio test which
+        # needs knnMatch(k=2), and OpenCV refuses k>1 when crossCheck is enabled.
+        self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
 
     def extract_all_matches(self, frames):
         """
@@ -42,7 +60,7 @@ class Calibrator:
         """
         all_matches = []
         for i in range(len(frames) - 1):
-            if self.matcher_type == "opencv":
+            if self.matcher_type in ("opencv", "sift"):
                 pts1, pts2 = self.match_with_opencv(frames[i], frames[i + 1])
             else:
                 pts1, pts2 = self.match_with_loftr(frames[i], frames[i + 1])
@@ -55,18 +73,21 @@ class Calibrator:
             )
         return all_matches
 
-    def match_with_opencv(self, frame1, frame2, threshold=0.7, num_matches=20):
+    def match_with_opencv(self, frame1, frame2, threshold=None, num_matches=None):
         """
-        Extracts all matches from video,
-        mostly intended to adjust camera intrinsics
-        :param frame1: first frame
-        :param frame2: second frame
-        :return: matching points
+        Detect + describe via self.alg, knn-match via self.matcher, run Lowe's
+        ratio test, return matched pixel coords. SIFT and ORB defaults differ:
+        SIFT produces fewer descriptors than ORB on small images, so the gates
+        loosen slightly when the active descriptor is SIFT.
         """
+        if threshold is None:
+            threshold = 0.75 if self.matcher_type == "sift" else 0.7
+        if num_matches is None:
+            num_matches = 8 if self.matcher_type == "sift" else 20
+
         gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
         gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
 
-        # Detect + compute
         kp1, des1 = self.alg.detectAndCompute(gray1, None)
         kp2, des2 = self.alg.detectAndCompute(gray2, None)
 
@@ -76,9 +97,8 @@ class Calibrator:
 
         matches = self.matcher.knnMatch(des1, des2, k=2)
 
-        # Lowe's ratio test
-        # https://sites.cc.gatech.edu/classes/AY2016/cs4476_fall/results/proj2/html/sshah426/index.html
-        # High ratio means clear match
+        # Lowe's ratio test — only keep matches where the best is clearly better
+        # than the runner-up.
         good_matches = []
         for match_pair in matches:
             if len(match_pair) == 2:

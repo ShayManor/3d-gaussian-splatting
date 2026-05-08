@@ -18,7 +18,7 @@ class MultiVideoProcessor:
     Processes multiple videos in order and turns them into one coordinate system.
     """
 
-    def __init__(self, cache="./cache", device="cuda", max_frames_per_video=100_000, matcher="opencv"):
+    def __init__(self, cache="./cache", device="cuda", max_frames_per_video=100_000, matcher="sift"):
         self.cache_dir = Path(cache)
         self.use_cache = True
         self.matcher = matcher

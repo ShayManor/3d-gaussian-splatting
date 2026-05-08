@@ -3,6 +3,7 @@ from logging import log, WARNING, INFO, DEBUG
 import cv2
 import numpy as np
 from lightglue import SuperPoint, LightGlue
+from scipy.spatial import cKDTree
 from tqdm import tqdm
 
 from src.video.calibrate import Calibrator
@@ -13,7 +14,7 @@ class VideoSFM:
     Class representing one video and getting the structure from frames
     """
 
-    def __init__(self, device="cuda", matcher="opencv"):
+    def __init__(self, device="cuda", matcher="sift"):
         self.extractor = SuperPoint().eval().to(device)  # More robust to changes
         self.matcher = LightGlue(features="superpoint").eval().to(device)
         self.calibrator = Calibrator(matcher)
@@ -21,127 +22,294 @@ class VideoSFM:
 
     def process_video_frames(self, frames, video_path, stride=5):
         """
-        Extract poses from series of video frames
-        :param frames: Series of frames
-        :param video_path: path to video
-        :param stride: Number of bytes per row in image
-        :return: Poses (representation of position and orientation compared to frame)
+        Run incremental SfM over a series of frames.
+
+        First accepted pair is initialized from the essential matrix (sets metric
+        scale, with |t|=1 by recoverPose convention). Every accepted frame after
+        that is registered with PnP against world points already triangulated by
+        prior pairs — so the global scale stays consistent and there is no scale
+        drift across pairs. New world points are triangulated using the PnP-recovered
+        absolute pose for the current frame and the previous accepted pose.
         """
-        poses = [np.identity(4)]
         K = self.calibrator.identify_intrinsics(
             frames[: min(50, len(frames))], video_path
         )
-
-        points_3d = []
-        point_colors = []
 
         frame_indices = list(range(0, len(frames), stride))
 
         if not frame_indices:
             return {
                 "poses": np.empty((0, 4, 4)),
-                "intrinsics": self.calibrator.identify_intrinsics([], video_path),
+                "intrinsics": K,
                 "points_3d": np.empty((0, 3)),
                 "colors": np.empty((0, 3)),
                 "frame_indices": np.empty((0,), int),
             }
 
-
-        prev_frame_idx = 0
+        poses = [np.identity(4)]
         pose_frame_indices = [frame_indices[0]]
+        points_3d = []
+        point_colors = []
+
+        # Track table: 2D positions (in the LAST accepted frame) of points whose
+        # world index we know. Used to find 3D-2D correspondences for PnP.
+        prev_track_kp = np.empty((0, 2), dtype=np.float32)
+        prev_track_widx = np.empty((0,), dtype=np.int64)
+
+        prev_frame_idx = frame_indices[0]
         n_dupes = 0
+        n_pnp_fail = 0
+        first_pair_done = False
+
+        # Gates tuned for SIFT (sparse, conservative). LoFTR/dense matchers
+        # comfortably exceed these on the first pair too.
+        MIN_MATCHES = 15
+        MIN_INLIERS = 30
+        MIN_FLOW_PX = 4.0
+        MIN_PNP_TRACKS = 8
+        # KLT optical-flow tracking carries sub-pixel positions; 6 px guards
+        # against drift in the LoFTR-grid case where match positions also wobble.
+        TRACK_RADIUS_PX = 6.0
+        MAX_REPROJ_PX = 2.0
 
         for i, frame_idx in enumerate(
             tqdm(frame_indices[1:], total=len(frame_indices) - 1, desc="Processing pairs"), 1
         ):
             if self._too_similar(frames[prev_frame_idx], frames[frame_idx]):
-                # prev_frame_idx = frame_idx
                 n_dupes += 1
                 continue
+
             matches = self.calibrator.extract_all_matches(
                 [frames[prev_frame_idx], frames[frame_idx]]
             )
-
-            if not matches or len(matches[0]["pts1"]) < 30:
-                poses.append(poses[-1])
-                log(
-                    WARNING, f"Not enough matches ({len(matches[0]['pts1'])}) in frame!"
-                )
-                # prev_frame_idx = frame_idx
+            if not matches or len(matches[0]["pts1"]) < MIN_MATCHES:
                 n_dupes += 1
                 continue
 
             pts1, pts2 = matches[0]["pts1"], matches[0]["pts2"]
 
-            R, t, inliers = self.estimate_pose_from_matches(pts1, pts2, K)
-            if R is None:
-                # prev_frame_idx = frame_idx
+            if not first_pair_done:
+                R_rel, t_rel, inliers = self.estimate_pose_from_matches(pts1, pts2, K)
+                if R_rel is None:
+                    n_dupes += 1
+                    continue
+
+                ninl = int(np.count_nonzero(inliers))
+                flow_med = (
+                    float(np.median(np.linalg.norm(pts2[inliers] - pts1[inliers], axis=1)))
+                    if ninl else 0.0
+                )
+                if ninl < MIN_INLIERS or flow_med < MIN_FLOW_PX:
+                    n_dupes += 1
+                    continue
+
+                pts1_in = pts1[inliers]
+                pts2_in = pts2[inliers]
+
+                rel_pose = np.eye(4)
+                rel_pose[:3, :3] = R_rel
+                rel_pose[:3, 3] = t_rel.squeeze()
+                # poses[0] is identity, so absolute world-to-cam is rel_pose.
+                absolute_pose = rel_pose @ poses[-1]
+
+                tri = self._triangulate_pair(
+                    pts1_in, pts2_in, K, poses[-1], absolute_pose, MAX_REPROJ_PX
+                )
+                if tri is None:
+                    n_dupes += 1
+                    continue
+                X_world, kept = tri
+                if len(X_world) < MIN_INLIERS // 2:
+                    n_dupes += 1
+                    continue
+
+                start = len(points_3d)
+                points_3d.extend(X_world)
+                point_colors.extend(self._extract_point_colors(frames[frame_idx], pts2_in[kept]))
+                poses.append(absolute_pose)
+                pose_frame_indices.append(frame_idx)
+
+                prev_track_kp = pts2_in[kept].astype(np.float32).copy()
+                prev_track_widx = np.arange(start, start + len(X_world), dtype=np.int64)
+                prev_frame_idx = frame_idx
+                first_pair_done = True
+                continue
+
+            # PnP path. Carry existing tracks forward with KLT (pixel-accurate,
+            # detector-independent), then run PnP on the surviving 3D-2D pairs.
+            gray_prev = cv2.cvtColor(frames[prev_frame_idx], cv2.COLOR_BGR2GRAY)
+            gray_curr = cv2.cvtColor(frames[frame_idx], cv2.COLOR_BGR2GRAY)
+            kp_in = prev_track_kp.reshape(-1, 1, 2).astype(np.float32)
+            kp_out, st, _ = cv2.calcOpticalFlowPyrLK(
+                gray_prev, gray_curr, kp_in, None,
+                winSize=(15, 15), maxLevel=3,
+                criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 1e-3),
+            )
+            if kp_out is None or st is None:
+                n_pnp_fail += 1
+                n_dupes += 1
+                continue
+            st = st.reshape(-1).astype(bool)
+            kp_out = kp_out.reshape(-1, 2)
+
+            # Reject tracks that left the image
+            h, w = gray_curr.shape
+            in_img = (kp_out[:, 0] >= 0) & (kp_out[:, 0] < w) & (kp_out[:, 1] >= 0) & (kp_out[:, 1] < h)
+            valid = st & in_img
+
+            if int(valid.sum()) < MIN_PNP_TRACKS:
+                n_pnp_fail += 1
                 n_dupes += 1
                 continue
 
-            # Quick parralax check and drop small candidates
-            ninl = int(np.count_nonzero(inliers)) if inliers is not None else 0
-            flow_med = float(np.median(np.linalg.norm(pts2[inliers] - pts1[inliers], axis=1))) if ninl else 0.0
+            tracked_widx = prev_track_widx[valid]
+            tracked_2d_curr = kp_out[valid]
+            obj_pts = np.asarray(points_3d, dtype=np.float64)[tracked_widx].reshape(-1, 1, 3)
+            img_pts = tracked_2d_curr.astype(np.float64).reshape(-1, 1, 2)
 
-            # TODO: Make this configurable
-            MIN_INLIERS = 100
-            MIN_FLOW_PX = 4.0
-            if ninl < MIN_INLIERS or flow_med < MIN_FLOW_PX:
-                # increase baseline and try the next candidate, do not triangulate
-                # prev_frame_idx = frame_idx  # advance anchor
+            ok, rvec, tvec, pnp_inl = cv2.solvePnPRansac(
+                objectPoints=obj_pts,
+                imagePoints=img_pts,
+                cameraMatrix=K,
+                distCoeffs=None,
+                iterationsCount=200,
+                reprojectionError=MAX_REPROJ_PX,
+                confidence=0.999,
+                flags=cv2.SOLVEPNP_EPNP,
+            )
+            if not ok or pnp_inl is None or len(pnp_inl) < MIN_PNP_TRACKS:
+                n_pnp_fail += 1
                 n_dupes += 1
                 continue
 
-            pts1 = pts1[inliers]
-            pts2 = pts2[inliers]
+            pnp_inl = pnp_inl.ravel()
+            rvec, tvec = cv2.solvePnPRefineLM(
+                obj_pts[pnp_inl], img_pts[pnp_inl], K, None, rvec, tvec
+            )
+            R_w2c, _ = cv2.Rodrigues(rvec)
+            absolute_pose = np.eye(4)
+            absolute_pose[:3, :3] = R_w2c
+            absolute_pose[:3, 3] = tvec.ravel()
 
-            # if len(pts1) < 30:
-            #     poses.append(poses[-1])
-            #     continue
+            # Sanity: motion since the previous accepted pose must be non-trivial.
+            T_rel = absolute_pose @ np.linalg.inv(poses[-1])
+            if np.linalg.norm(T_rel[:3, 3]) < 1e-3:
+                n_dupes += 1
+                continue
 
-            # Builds absolute pose
-            pose = np.eye(4)
-            pose[:3, :3] = R
-            pose[:3, 3] = t.squeeze()
-            absolute_pose = pose @ poses[-1]  # world to camera
+            # Discover new points via LoFTR matches in this pair, excluding any
+            # match whose pts1 lands close to an already-tracked keypoint in the
+            # previous frame (so we don't re-triangulate what we already track).
+            tree = cKDTree(prev_track_kp)
+            d_lookup, _ = tree.query(pts1, distance_upper_bound=TRACK_RADIUS_PX)
+            new_match_mask = ~(np.isfinite(d_lookup) & (d_lookup < TRACK_RADIUS_PX))
+
+            new_kp_curr = np.empty((0, 2), dtype=np.float32)
+            new_widx = np.empty((0,), dtype=np.int64)
+            if int(new_match_mask.sum()) >= MIN_PNP_TRACKS:
+                pts1_new = pts1[new_match_mask]
+                pts2_new = pts2[new_match_mask]
+                tri = self._triangulate_pair(
+                    pts1_new, pts2_new, K, poses[-1], absolute_pose, MAX_REPROJ_PX
+                )
+                if tri is not None:
+                    X_world_new, kept_new = tri
+                    start = len(points_3d)
+                    points_3d.extend(X_world_new)
+                    point_colors.extend(
+                        self._extract_point_colors(frames[frame_idx], pts2_new[kept_new])
+                    )
+                    new_kp_curr = pts2_new[kept_new].astype(np.float32)
+                    new_widx = np.arange(start, start + len(X_world_new), dtype=np.int64)
+
             poses.append(absolute_pose)
             pose_frame_indices.append(frame_idx)
 
-            # Triangulate new points
-            if len(poses) > 1:
-                new_points = self.triangulate_points(
-                    pts1, pts2, K, poses[-2], poses[-1]
-                )
-                if new_points is not None and len(new_points):
-                    points_3d.extend(new_points)
-                    # Extract colors from frame
-                    colors = self._extract_point_colors(frames[frame_idx], pts2)
-                    point_colors.extend(colors)
-                else:
-                    log(WARNING, f"Triangulation failed at frame {i}")
-
+            # Next track table = surviving KLT tracks (PnP inliers, with their
+            # KLT-tracked 2D position in the just-registered frame) + new points.
+            carried_2d_curr = tracked_2d_curr[pnp_inl].astype(np.float32)
+            carried_widx = tracked_widx[pnp_inl]
+            prev_track_kp = np.vstack([carried_2d_curr, new_kp_curr]) if (len(carried_2d_curr) + len(new_kp_curr)) else np.empty((0, 2), dtype=np.float32)
+            prev_track_widx = np.concatenate([carried_widx, new_widx])
             prev_frame_idx = frame_idx
 
-        log(INFO, f"SFM complete: {len(poses)} poses, {len(points_3d)} 3D points")
+        log(INFO, f"SFM complete: {len(poses)} poses, {len(points_3d)} 3D points (PnP fails: {n_pnp_fail})")
         if n_dupes > 0.3 * (len(frame_indices) - 1):
             log(WARNING, f"Number of dupes (skip failures): {n_dupes}")
         else:
             log(INFO, f"Number of dupes (skip failures): {n_dupes}")
 
-        poses = np.array(poses)
-
-        log(DEBUG, "SFM poses[0]:\n", poses[0])
-        if len(poses) > 1:
-            log(DEBUG, "SFM poses[1]:\n", poses[1])
-        log(DEBUG, "SFM #3D points:", len(points_3d))
-
+        poses_arr = np.array(poses)
         return {
-            "poses": np.array(poses),
+            "poses": poses_arr,
             "intrinsics": K,
             "points_3d": np.array(points_3d) if points_3d else np.empty((0, 3)),
             "colors": np.array(point_colors) if point_colors else np.empty((0, 3)),
             "frame_indices": np.array(pose_frame_indices, dtype=int),
         }
+
+    def _triangulate_pair(self, pts1, pts2, K, pose1, pose2, max_reproj_error):
+        """
+        Triangulate matched 2D points across two world-to-camera poses and return the
+        surviving world-frame points together with the boolean mask of which input
+        rows survived (cheirality + reprojection-error filter). Returns None if no
+        points survive.
+        """
+        x1 = cv2.undistortPoints(pts1.reshape(-1, 1, 2), K, None).reshape(-1, 2).T.astype(np.float64)
+        x2 = cv2.undistortPoints(pts2.reshape(-1, 1, 2), K, None).reshape(-1, 2).T.astype(np.float64)
+
+        T21 = pose2 @ np.linalg.inv(pose1)
+        R = T21[:3, :3]
+        t = T21[:3, 3:4]
+
+        P0 = np.hstack([np.eye(3), np.zeros((3, 1))])
+        P1 = np.hstack([R, t])
+        Xh = cv2.triangulatePoints(P0, P1, x1, x2)
+        # Reject points at/near infinity before dividing — these would produce
+        # inf/nan and pollute downstream projections.
+        finite_h = np.abs(Xh[3]) > 1e-8
+        with np.errstate(divide="ignore", invalid="ignore"):
+            X = (Xh[:3] / Xh[3]).T
+        finite_h = finite_h & np.isfinite(X).all(axis=1)
+        if not finite_h.any():
+            return None
+
+        z1 = X[:, 2]
+        with np.errstate(invalid="ignore", over="ignore"):
+            X2 = (R @ X.T + t).T
+            z2 = X2[:, 2]
+            proj1 = (K @ X.T).T
+            proj2 = (K @ X2.T).T
+            proj1 = proj1[:, :2] / proj1[:, 2:3]
+            proj2 = proj2[:, :2] / proj2[:, 2:3]
+
+        # Mark non-finite rows as failures up front.
+        finite_proj = (
+            np.isfinite(proj1).all(axis=1) & np.isfinite(proj2).all(axis=1)
+            & np.isfinite(z1) & np.isfinite(z2)
+        )
+        ok_input = finite_h & finite_proj
+
+        mask = self._filter_triangulated_points(
+            points_3d=X,
+            pts1=pts1,
+            pts2=pts2,
+            proj1=proj1,
+            proj2=proj2,
+            z1=z1,
+            z2=z2,
+            max_reproj_error=max_reproj_error,
+        )
+        mask = mask & ok_input
+
+        if not mask.any():
+            return None
+
+        Twc1 = np.linalg.inv(pose1)
+        Xc1 = X[mask]
+        Xh = np.hstack([Xc1, np.ones((Xc1.shape[0], 1))])
+        Xw = (Twc1 @ Xh.T).T[:, :3]
+        return Xw, mask
 
     def estimate_pose_from_matches(self, pts1, pts2, K):
         """
@@ -178,91 +346,15 @@ class VideoSFM:
         inliers = pose_mask.ravel().astype(bool)
         return R, t, inliers
 
-    def triangulate_points(self, pts1, pts2, K, pose1, pose2):
+    def triangulate_points(self, pts1, pts2, K, pose1, pose2, max_reproj_error=2.0):
         """
-        Triangulates 3D points from the given 2D points
-        :param pts1: First 2d point
-        :param pts2: Second 2d point
-        :param K: Camera intrinsics
-        :param pose1: Position and orientation with respect to camera
-        :param pose2: Position and orientation with respect to camera
-        :return: Triangulated 3D points
+        Triangulate matched 2D points across two world-to-camera poses and return
+        the world-frame 3D points that pass cheirality and reprojection filters.
         """
-        # Projection Matrices
-        # P1 = K @ pose1[:3, :]
-        # P2 = K @ pose2[:3, :]
-        #
-        # W2C1 = pose1
-        # W2C2 = pose2
-        # C2W1 = np.linalg.inv(W2C1)
-        # T21 = W2C2 @ C2W1  # 4x4
-        # R = T21[:3, :3]
-        # t = T21[:3, 3:4]
-
-        # Triangulate
-        pts1_h = cv2.undistortPoints(pts1.reshape(-1, 1, 2), K, None).reshape(-1, 2)
-        pts2_h = cv2.undistortPoints(pts2.reshape(-1, 1, 2), K, None).reshape(-1, 2)
-
-        x1 = pts1_h.T.astype(np.float64)  # shape 2xN
-        x2 = pts2_h.T.astype(np.float64)  # shape 2xN
-
-        # Pose is world-to-camera
-        # Tcw1 = np.linalg.inv(pose1)[:3, :4]  # 3x4
-        # Tcw2 = np.linalg.inv(pose2)[:3, :4]  # 3x4
-
-        # Relative pose from cam1 to cam2: T21 = Tcw2 * Twc1
-        # Twc1 = np.vstack([np.linalg.inv(pose1)[:3, :4], [0, 0, 0, 1]])
-        # Twc2 = np.vstack([np.linalg.inv(pose2)[:3, :4], [0, 0, 0, 1]])
-        T21 = pose2 @ np.linalg.inv(pose1)  # W2C2 * C2W1
-        R = T21[:3, :3]
-        t = T21[:3, 3:4]  # column vector
-
-        P0 = np.hstack([np.eye(3), np.zeros((3, 1))])  # normalized projection for cam1
-        P1 = np.hstack([R, t])  # normalized projection for cam2
-
-        # Triangulated in normal space
-        Xh = cv2.triangulatePoints(P0, P1, x1, x2)  # 4xN
-        X = (Xh[:3] / Xh[3]).T  # Nx3 in cam1 frame
-
-        z1 = X[:, 2]  # Depth in cam1 coords
-
-        # Transform X to cam2: X2 = R*X + t
-        X2 = (R @ X.T + t).T
-        z2 = X2[:, 2]
-
-        cheirality_mask = (z1 > 0) & (z2 > 0)
-
-        # Reproj in pixels
-        Xh1 = np.hstack([X, np.ones((len(X), 1))])  # Nx4 in cam1
-        # cam1: [I|0]
-        proj1 = (K @ Xh1[:, :3].T).T
-        proj1 = proj1[:, :2] / proj1[:, 2:3]
-
-        # cam2: [R|t]
-        Xh2 = (R @ X.T + t).T  # Nx3
-        proj2 = (K @ Xh2.T).T
-        proj2 = proj2[:, :2] / proj2[:, 2:3]
-
-        mask = self._filter_triangulated_points(
-            points_3d=X,  # in cam1 coords
-            pts1=pts1,
-            pts2=pts2,
-            proj1=proj1,
-            proj2=proj2,
-            z1=z1,
-            z2=z2,
-        )
-
-        if not mask.any():
+        result = self._triangulate_pair(pts1, pts2, K, pose1, pose2, max_reproj_error)
+        if result is None:
             return None
-
-        X_cam1 = X[mask]
-        # pose1: world-to-camera => invert to get cam-to-world
-        Twc1 = np.linalg.inv(pose1)  # 4x4
-        X_h = np.hstack([X_cam1, np.ones((X_cam1.shape[0], 1))])  # Nx4
-        X_world = (Twc1 @ X_h.T).T[:, :3]  # Nx3 in world coords
-
-        return X_world
+        return result[0]
 
     def _too_similar(self, img1, img2,
                      corr_t=0.995, mad_t=0.6, flow_px=0.6, max_corners=400):
@@ -317,7 +409,7 @@ class VideoSFM:
         proj2,
         z1,
         z2,
-        max_reproj_error=6.0,
+        max_reproj_error=2.0,
     ):
         """
         Filters the 3D points based on reprojection error and depth

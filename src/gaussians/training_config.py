@@ -21,6 +21,15 @@ class TrainingConfig:
     prune_interval: int = 2000
     opacity_reset_interval: int = 5000
 
+    # Densify thresholds (multipliers against scene_extent)
+    densify_grads_threshold: float = 5e-4
+    densify_min_opacity: float = 0.005
+    densify_max_screen_size: float = 12.0
+    # max_scale <= extent * clone_extent_ratio -> clone candidate
+    densify_clone_extent_ratio: float = 0.1
+    # max_scale  > extent * prune_extent_ratio -> "too big" prune candidate
+    densify_prune_extent_ratio: float = 2.0
+
     # Training config
     iterations_per_video: int = 3e5
     batch_size: int = 4

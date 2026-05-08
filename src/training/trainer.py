@@ -37,6 +37,12 @@ class GaussianTrainer:
 
         self._step_start_time = None
 
+        # Cumulative densify counters for W&B trend curves.
+        self._cum_cloned = 0
+        self._cum_split = 0
+        self._cum_pruned = 0
+        self._densify_event_idx = 0
+
     # ----- W&B helpers ---------------------------------------------------
 
     def _wandb_log(self, data: Dict, step: Optional[int] = None):
@@ -148,18 +154,33 @@ class GaussianTrainer:
         pose0 = poses[0]
         K = np.array(K)
 
-        X = np.asarray(points_3d)
-        X_h = np.concatenate([X, np.ones((X.shape[0], 1))], axis=1)
-        X_c = (pose0 @ X_h.T).T
-        Z = X_c[:, 2]
-        good = Z > 0
-        X_c = X_c[good]
+        # Skip non-finite/extreme points before matmul — outliers (z near 0 or
+        # z >> scene scale) overflow the projection and pollute the image.
+        X = np.asarray(points_3d, dtype=np.float64)
+        finite = np.isfinite(X).all(axis=1)
+        X = X[finite]
+        if len(X) == 0:
+            cv2.imwrite(out_path, frame)
+            return frame
 
-        proj = (K @ X_c[:, :3].T).T
-        proj = proj[:, :2] / proj[:, 2:3]
+        X_h = np.concatenate([X, np.ones((X.shape[0], 1))], axis=1)
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            X_c = (pose0 @ X_h.T).T
+        Z = X_c[:, 2]
+        good = (Z > 1e-3) & np.isfinite(Z) & np.isfinite(X_c).all(axis=1)
+        X_c = X_c[good]
+        if len(X_c) == 0:
+            cv2.imwrite(out_path, frame)
+            return frame
+
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            proj = (K @ X_c[:, :3].T).T
+            uv = proj[:, :2] / proj[:, 2:3]
+        valid = np.isfinite(uv).all(axis=1)
+        uv = uv[valid]
 
         img = frame.copy()
-        for u, v in proj.astype(int):
+        for u, v in uv.astype(int):
             if 0 <= u < img.shape[1] and 0 <= v < img.shape[0]:
                 img[v, u] = (0, 0, 255)
 
@@ -431,8 +452,9 @@ class GaussianTrainer:
         ssim_sum = 0.0
         psnr_sum = 0.0
         n = 0
-        first_render = None
-        first_gt = None
+        gallery = []  # (gt_uint8, render_uint8, l1, ssim, psnr) per view, capped
+
+        max_gallery = 6
 
         for view in val_views:
             if view["video_path"] not in loaders:
@@ -458,9 +480,10 @@ class GaussianTrainer:
             psnr_sum += psnr
             n += 1
 
-            if first_render is None:
-                first_render = self._render_to_uint8(img)
-                first_gt = self._render_to_uint8(gt)
+            if len(gallery) < max_gallery:
+                gallery.append(
+                    (self._render_to_uint8(gt), self._render_to_uint8(img), l1, ssim, psnr, view["frame_idx"])
+                )
 
         if n == 0:
             return None
@@ -471,14 +494,24 @@ class GaussianTrainer:
             "val/psnr": psnr_sum / n,
             "val/n_views": n,
         }
-        if first_render is not None and self.wandb_run is not None:
+        if gallery and self.wandb_run is not None:
             try:
                 import wandb
-                side = np.hstack([first_gt, first_render])
+                # First entry: large side-by-side for backward compat.
+                gt0, ren0, l10, ss0, ps0, fi0 = gallery[0]
                 out["val/sample"] = wandb.Image(
-                    side[..., ::-1],  # BGR -> RGB
-                    caption=f"iter {self.iteration} | left=GT right=render",
+                    np.hstack([gt0, ren0])[..., ::-1],
+                    caption=f"iter {self.iteration} f{fi0} | l1={l10:.3f} psnr={ps0:.2f} | left=GT right=render",
                 )
+                # Multi-view gallery
+                gallery_imgs = [
+                    wandb.Image(
+                        np.hstack([gt, ren])[..., ::-1],
+                        caption=f"f{fi} l1={l1:.3f} ssim={ss:.3f} psnr={ps:.2f}",
+                    )
+                    for gt, ren, l1, ss, ps, fi in gallery
+                ]
+                out["val/gallery"] = gallery_imgs
             except Exception as e:
                 log(WARNING, f"wandb val image failed: {e}")
         return out
@@ -556,13 +589,54 @@ class GaussianTrainer:
             except Exception as e:
                 log(WARNING, f"wandb init image log failed: {e}")
 
-        # Scene extent for densification
+        # Scene extent for densification — robust to triangulation outliers.
+        # Naive bbox.max() blows up when a few SfM points land at near-infinity,
+        # which collapses the densify thresholds (everything qualifies for
+        # cloning, nothing for splitting/pruning).
         points_3d = merged_data["points_3d"]
         if len(points_3d):
-            bbox = points_3d.max(0) - points_3d.min(0)
-            scene_extent = float(bbox.max())
+            centroid = np.median(points_3d, axis=0)
+            radii = np.linalg.norm(points_3d - centroid, axis=1)
+            radii_finite = radii[np.isfinite(radii)]
+            if len(radii_finite) >= 8:
+                # 95th-percentile radius * 2 ≈ "diameter of the inlier cloud"
+                scene_extent = float(2.0 * np.percentile(radii_finite, 95))
+                n_outliers = int((radii > scene_extent).sum())
+            else:
+                scene_extent = float(np.linalg.norm(points_3d.max(0) - points_3d.min(0)))
+                n_outliers = 0
+            scene_bbox = points_3d.max(0) - points_3d.min(0)
         else:
             scene_extent = 10.0
+            n_outliers = 0
+            scene_bbox = np.array([0.0, 0.0, 0.0])
+        log(INFO, f"scene_extent={scene_extent:.3f}  outliers_dropped={n_outliers}/{len(points_3d)}")
+
+        # SfM dataset stats logged once at iter 0
+        if self.wandb_run is not None and len(points_3d):
+            try:
+                depths = []
+                for p_arr in merged_data["all_poses"]:
+                    for pose in p_arr:
+                        Xh = np.hstack([points_3d, np.ones((len(points_3d), 1))])
+                        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                            Xc = (pose @ Xh.T).T
+                        z = Xc[:, 2]
+                        depths.append(np.median(z[(z > 0) & np.isfinite(z)]))
+                self._wandb_log(
+                    {
+                        "scene/extent": scene_extent,
+                        "scene/n_outliers_dropped": n_outliers,
+                        "scene/bbox_x": float(scene_bbox[0]),
+                        "scene/bbox_y": float(scene_bbox[1]),
+                        "scene/bbox_z": float(scene_bbox[2]),
+                        "scene/median_depth": float(np.median(depths)) if depths else 0.0,
+                        "scene/n_cameras": int(sum(len(p) for p in merged_data["all_poses"])),
+                    },
+                    step=0,
+                )
+            except Exception as e:
+                log(WARNING, f"wandb scene stats log failed: {e}")
 
         # Training loop
         progress = tqdm(total=int(self.config.iterations_per_video), desc="Training")
@@ -586,14 +660,14 @@ class GaussianTrainer:
                 and self.iteration % self.config.densify_interval == 0
             ):
                 stats = gaussians.densify_and_prune(
-                    grads_threshold=5e-4,
-                    min_opacity=0.005,
+                    grads_threshold=self.config.densify_grads_threshold,
+                    min_opacity=self.config.densify_min_opacity,
                     extent=scene_extent,
-                    max_screen_size=12.0,
+                    max_screen_size=self.config.densify_max_screen_size,
+                    optimizer=optimizer,
+                    clone_extent_ratio=self.config.densify_clone_extent_ratio,
+                    prune_extent_ratio=self.config.densify_prune_extent_ratio,
                 )
-                gaussians.xyz_gradient_accum.zero_()
-                gaussians.xyz_gradient_count.zero_()
-                optimizer = self._setup_optimizer(gaussians)
                 self._wandb_log(
                     {
                         "densify/cloned": stats["cloned"],
@@ -602,8 +676,16 @@ class GaussianTrainer:
                         "densify/n_before": stats["n_before"],
                         "densify/n_after": stats["n_after"],
                         "densify/delta": stats["n_after"] - stats["n_before"],
+                        "densify/cumulative_cloned": self._cum_cloned,
+                        "densify/cumulative_split": self._cum_split,
+                        "densify/cumulative_pruned": self._cum_pruned,
+                        "densify/event_idx": self._densify_event_idx,
                     }
                 )
+                self._cum_cloned += stats["cloned"]
+                self._cum_split += stats["split"]
+                self._cum_pruned += stats["pruned"]
+                self._densify_event_idx += 1
 
             # Periodic opacity reset
             if self.iteration % self.config.opacity_reset_interval == 0:
@@ -631,6 +713,28 @@ class GaussianTrainer:
                 window = max(now - last_window_start, 1e-9)
                 steps_per_sec = self.config.log_scalar_interval / window
                 last_window_start = now
+
+                # Per-group LRs (xyz is the only one updated by the schedule today,
+                # but the others may evolve in the future).
+                lrs = {f"train/lr_{g.get('name','grp')}": float(g["lr"]) for g in optimizer.param_groups}
+
+                # Distribution percentiles of opacity & scale (snapshot — cheap)
+                with torch.no_grad():
+                    op = gaussians.get_opacity.detach().reshape(-1)
+                    sc = gaussians.get_scaling.detach().reshape(-1)
+                    op_q = torch.quantile(op, torch.tensor([0.5, 0.95, 0.99], device=op.device))
+                    sc_q = torch.quantile(sc, torch.tensor([0.5, 0.95, 0.99], device=sc.device))
+                    grad_norms = {}
+                    for name, p in (
+                        ("xyz", gaussians.xyz),
+                        ("opacity", gaussians.opacity),
+                        ("scaling", gaussians.scaling),
+                        ("rotation", gaussians.rotation),
+                        ("features_dc", gaussians.features_dc),
+                    ):
+                        if p.grad is not None:
+                            grad_norms[f"grad/{name}_norm"] = float(p.grad.detach().norm().item())
+
                 self._wandb_log(
                     {
                         "train/loss": step_metrics["loss"],
@@ -638,10 +742,20 @@ class GaussianTrainer:
                         "train/ssim": step_metrics["ssim"],
                         "train/psnr": step_metrics["psnr"],
                         "train/lr_xyz": lr_xyz,
+                        **lrs,
                         "train/n_gaussians": int(gaussians.xyz.shape[0]),
-                        "train/mean_opacity": float(gaussians.get_opacity.mean().item()),
-                        "train/mean_scale": float(gaussians.get_scaling.mean().item()),
+                        "train/mean_opacity": float(op.mean().item()),
+                        "train/mean_scale": float(sc.mean().item()),
+                        "train/median_opacity": float(op_q[0].item()),
+                        "train/p95_opacity": float(op_q[1].item()),
+                        "train/p99_opacity": float(op_q[2].item()),
+                        "train/median_scale": float(sc_q[0].item()),
+                        "train/p95_scale": float(sc_q[1].item()),
+                        "train/p99_scale": float(sc_q[2].item()),
+                        "train/max_scale": float(sc.max().item()),
                         "train/steps_per_sec": steps_per_sec,
+                        "train/wallclock_sec": time.time() - self._step_start_time,
+                        **grad_norms,
                     }
                 )
 

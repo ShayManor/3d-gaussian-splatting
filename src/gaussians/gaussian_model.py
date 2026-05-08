@@ -3,6 +3,53 @@ from torch import nn
 from torch.nn import functional as F
 
 
+_PARAM_ATTRS = ("xyz", "features_dc", "features_rest", "opacity", "scaling", "rotation")
+
+
+def _replace_param_in_optimizer(model, attr, new_data, optimizer, *, keep_mask=None, append_data_for_state=None):
+    """
+    Replace `model.<attr>` (an nn.Parameter) with a new Parameter wrapping `new_data`,
+    and — if `optimizer` is provided — carry the Adam moment buffers across to the
+    new parameter so per-parameter momentum is preserved through densify/prune.
+
+    Exactly one of `keep_mask` or `append_data_for_state` must be supplied, and
+    `new_data` must already match that operation:
+      * keep_mask           : `new_data == old[keep_mask]`        (for prune)
+      * append_data_for_state: `new_data == cat([old, append])`   (for densify/clone)
+    """
+    old = getattr(model, attr)
+    new_param = nn.Parameter(new_data)
+    setattr(model, attr, new_param)
+
+    if optimizer is None:
+        return new_param
+
+    for group in optimizer.param_groups:
+        for i, p in enumerate(group["params"]):
+            if p is old:
+                group["params"][i] = new_param
+                state = optimizer.state.pop(old, None)
+                if state is not None:
+                    new_state = {k: v for k, v in state.items()}
+                    for sk in ("exp_avg", "exp_avg_sq"):
+                        buf = state.get(sk)
+                        if buf is None:
+                            continue
+                        if keep_mask is not None:
+                            new_state[sk] = buf[keep_mask]
+                        elif append_data_for_state is not None:
+                            n_new = append_data_for_state.shape[0]
+                            zeros = torch.zeros(
+                                (n_new, *buf.shape[1:]),
+                                dtype=buf.dtype,
+                                device=buf.device,
+                            )
+                            new_state[sk] = torch.cat([buf, zeros], dim=0)
+                    optimizer.state[new_param] = new_state
+                return new_param
+    return new_param
+
+
 class GaussianModel(nn.Module):
     """
     Gaussian model optimized for GPUs
@@ -66,10 +113,23 @@ class GaussianModel(nn.Module):
         min_opacity: float,
         extent: float,
         max_screen_size: float,
+        optimizer=None,
+        clone_extent_ratio: float = 0.1,
+        prune_extent_ratio: float = 2.0,
     ):
         """
-        Densifies and prunes low-opacity gaussians.
-        Returns a dict of event counts (cloned/split/pruned) and population sizes.
+        Densify (clone + split) and prune gaussians in a single sweep.
+
+        If `optimizer` is provided, Adam moment buffers (`exp_avg`, `exp_avg_sq`)
+        are spliced through every parameter-tensor change, so per-parameter
+        momentum is preserved across densify events. Without this, every densify
+        wipes Adam's first/second moments and the optimizer spends ~hundreds of
+        iterations re-warming up its per-parameter step sizes.
+
+        `clone_extent_ratio` and `prune_extent_ratio` scale the densify
+        thresholds against the scene extent:
+          * clone candidates have `max_scale <= extent * clone_extent_ratio`
+          * "too large" prune candidates have `max_scale > extent * prune_extent_ratio`
         """
         stats = {
             "cloned": 0,
@@ -80,75 +140,70 @@ class GaussianModel(nn.Module):
         with torch.no_grad():
             grads = self.xyz_gradient_accum / (self.xyz_gradient_count + 1e-8)
             grads_norm = torch.norm(grads, dim=-1)
-
-            # Clone small gaussians with high gradients
             scales = self.get_scaling
             max_scale = scales.amax(dim=-1)
-
             opacity = self.get_opacity.squeeze()
 
             clone_mask = (
-                    (grads_norm >= grads_threshold) &
-                    (max_scale <= extent * 0.1) &
-                    (opacity > min_opacity)
+                (grads_norm >= grads_threshold)
+                & (max_scale <= extent * clone_extent_ratio)
+                & (opacity > min_opacity)
             )
             if clone_mask.sum() > 0:
                 stats["cloned"] = int(clone_mask.sum().item())
-                self._clone_gaussians(clone_mask)
+                self._clone_gaussians(clone_mask, optimizer=optimizer)
 
-            # Split large gaussians (high gradients and large)
+            # Recompute everything — clone above may have grown the tensors.
             grads = self.xyz_gradient_accum / (self.xyz_gradient_count + 1e-8)
             grads_norm = torch.norm(grads, dim=-1)
-            scales = self.get_scaling
-            max_scale = scales.amax(dim=-1)
-
-            split_mask = (
-                    (grads_norm >= grads_threshold) &
-                    (max_scale > extent * 0.1) &
-                    (opacity > min_opacity)
-            )
-            if split_mask.sum() > 0:
-                stats["split"] = int(split_mask.sum().item())
-                self._split_gaussians(split_mask)
-
-            grads = self.xyz_gradient_accum / (self.xyz_gradient_count + 1e-8)
-            grads_norm = torch.norm(grads, dim=-1)
-
-            # Prune low opacity gaussians
             scales = self.get_scaling
             max_scale = scales.amax(dim=-1)
             opacity = self.get_opacity.squeeze()
 
-            # only kill gaussians that are BOTH dark and unused
+            split_mask = (
+                (grads_norm >= grads_threshold)
+                & (max_scale > extent * clone_extent_ratio)
+                & (opacity > min_opacity)
+            )
+            if split_mask.sum() > 0:
+                stats["split"] = int(split_mask.sum().item())
+                self._split_gaussians(split_mask, optimizer=optimizer)
+
+            grads = self.xyz_gradient_accum / (self.xyz_gradient_count + 1e-8)
+            grads_norm = torch.norm(grads, dim=-1)
+            scales = self.get_scaling
+            max_scale = scales.amax(dim=-1)
+            opacity = self.get_opacity.squeeze()
+
             low_op = opacity < min_opacity
             low_grad = grads_norm < grads_threshold
-            too_big = max_scale > extent * 2.0  # true outliers only
-
+            too_big = max_scale > extent * prune_extent_ratio
             prune_mask = (low_op & low_grad) | too_big
 
             if prune_mask.sum() > 0:
                 stats["pruned"] = int(prune_mask.sum().item())
-                self._prune_gaussians(~prune_mask)  # not operator because prune removes
+                self._prune_gaussians(~prune_mask, optimizer=optimizer)
 
-            # Reset gradients
-            self.xyz_gradient_count.zero_()
-            self.xyz_gradient_accum.zero_()
+            # Reset gradient accumulators (sized to current N).
+            self.xyz_gradient_count = torch.zeros_like(self.xyz_gradient_count)
+            self.xyz_gradient_accum = torch.zeros_like(self.xyz_gradient_accum)
 
         stats["n_after"] = int(self.xyz.shape[0])
         return stats
 
-    def _clone_gaussians(self, mask):
+    def _clone_gaussians(self, mask, optimizer=None):
         """
-        Clones the masked gaussians
-        :param mask: The given mask
+        Clone gaussians selected by `mask` (bool or long-index tensor) — append
+        copies of their parameter rows. Adam state is spliced if `optimizer` is
+        passed.
         """
-        # mask can be bool or Long indices
         if mask.dtype == torch.bool:
             idx = mask.nonzero(as_tuple=False).view(-1)
         else:
             idx = mask
         if idx.numel() == 0:
             return
+
         new_xyz = self.xyz[idx]
         new_features_dc = self.features_dc[idx]
         new_features_rest = self.features_rest[idx]
@@ -156,26 +211,27 @@ class GaussianModel(nn.Module):
         new_scaling = self.scaling[idx]
         new_rotation = self.rotation[idx]
 
-        self.densify(new_xyz, new_features_dc, new_features_rest,
-                     new_opacity, new_scaling, new_rotation)
+        self.densify(
+            new_xyz, new_features_dc, new_features_rest,
+            new_opacity, new_scaling, new_rotation,
+            optimizer=optimizer,
+        )
 
-    def _split_gaussians(self, mask):
+    def _split_gaussians(self, mask, optimizer=None):
         """
-        Splits large gaussians / high gradients into smaller ones
-        :param mask: Mask for which to split
+        Split large/high-gradient gaussians into `n_splits` (=2) smaller ones,
+        positioned with isotropic Gaussian noise around the original. The
+        original is pruned first, then the children are appended. Adam state is
+        spliced if `optimizer` is passed.
         """
-        # mask can be bool or Long indices
         if mask.dtype == torch.bool:
             idx = mask.nonzero(as_tuple=False).view(-1)
         else:
             idx = mask
-
         if idx.numel() == 0:
             return
 
         n_splits = 2
-
-        # Get Gaussians to split
         xyz = self.xyz[idx]
         features_dc = self.features_dc[idx].repeat(n_splits, 1, 1)
         features_rest = self.features_rest[idx].repeat(n_splits, 1, 1)
@@ -183,69 +239,71 @@ class GaussianModel(nn.Module):
         scaling = self.scaling[idx].repeat(n_splits, 1)
         rotation = self.rotation[idx].repeat(n_splits, 1)
 
-        # Reduces scaling and adds noise to positions to remove. 1.6 was used by others (plagiarized)
+        # 1.6 is from the original 3DGS paper.
         scaling = scaling - torch.log(torch.tensor(1.6, device=scaling.device))
-
-        # scales = self.get_scaling[mask].repeat(n_splits, 1)
-        # rotations = self.get_rotation[mask].repeat(n_splits, 1)
         scales = torch.exp(scaling)
-
-        # Samples by creating a new random normal tensor in the same shape repeated
         samples = torch.randn_like(xyz.repeat(n_splits, 1)) * scales[:, :3]
         new_xyz = xyz.repeat(n_splits, 1) + samples
 
-        keep_mask = torch.ones(self.xyz.shape[0], dtype=torch.bool,
-                               device=self.xyz.device)
+        keep_mask = torch.ones(self.xyz.shape[0], dtype=torch.bool, device=self.xyz.device)
         keep_mask[idx] = False
-        self._prune_gaussians(keep_mask)
+        self._prune_gaussians(keep_mask, optimizer=optimizer)
+        self.densify(
+            new_xyz, features_dc, features_rest,
+            opacity, scaling, rotation,
+            optimizer=optimizer,
+        )
 
-        # Remove original
-        # self._prune_gaussians(~mask)
-        # self.densify(xyz, features_dc, features_rest, opacity, scaling, rotation)
-        self.densify(new_xyz, features_dc, features_rest,
-                     opacity, scaling, rotation)
-
-    def _prune_gaussians(self, keep_mask):
+    def _prune_gaussians(self, keep_mask, optimizer=None):
         """
-        Efficiently removes gaussians
-        :param keep_mask: Mask for gaussians to keep
+        Subset every parameter tensor by `keep_mask`. Adam state is spliced if
+        `optimizer` is passed. Buffers (gradient accumulators, max radii) are
+        always sliced — they are not optimizer parameters.
         """
-        self.xyz = nn.Parameter(self.xyz[keep_mask])
-        self.features_dc = nn.Parameter(self.features_dc[keep_mask])
-        self.features_rest = nn.Parameter(self.features_rest[keep_mask])
-        self.opacity = nn.Parameter(self.opacity[keep_mask])
-        self.scaling = nn.Parameter(self.scaling[keep_mask])
-        self.rotation = nn.Parameter(self.rotation[keep_mask])
+        for attr in _PARAM_ATTRS:
+            old = getattr(self, attr)
+            _replace_param_in_optimizer(
+                self, attr, old.detach()[keep_mask], optimizer, keep_mask=keep_mask
+            )
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[keep_mask]
         self.xyz_gradient_count = self.xyz_gradient_count[keep_mask]
         self.max_radii_2D = self.max_radii_2D[keep_mask]
 
-    def densify(self, new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation):
+    def densify(
+        self,
+        new_xyz, new_features_dc, new_features_rest,
+        new_opacity, new_scaling, new_rotation,
+        optimizer=None,
+    ):
         """
-        Adds new gaussians efficiently from given values
+        Append new gaussians. Adam state is spliced (zero-initialized rows) if
+        `optimizer` is passed.
         """
-        # Concatenate parameters
-        self.xyz = nn.Parameter(torch.cat([self.xyz, new_xyz]))
-        self.features_dc = nn.Parameter(torch.cat([self.features_dc, new_features_dc]))
-        self.features_rest = nn.Parameter(torch.cat([self.features_rest, new_features_rest]))
-        self.opacity = nn.Parameter(torch.cat([self.opacity, new_opacity]))
-        self.scaling = nn.Parameter(torch.cat([self.scaling, new_scaling]))
-        self.rotation = nn.Parameter(torch.cat([self.rotation, new_rotation]))
+        appends = {
+            "xyz": new_xyz,
+            "features_dc": new_features_dc,
+            "features_rest": new_features_rest,
+            "opacity": new_opacity,
+            "scaling": new_scaling,
+            "rotation": new_rotation,
+        }
+        for attr, append_data in appends.items():
+            old = getattr(self, attr)
+            new_data = torch.cat([old.detach(), append_data], dim=0)
+            _replace_param_in_optimizer(
+                self, attr, new_data, optimizer,
+                append_data_for_state=append_data,
+            )
 
-        # update stats
         n_new = new_xyz.shape[0]
         device = new_xyz.device
-        self.xyz_gradient_accum = torch.cat([
-            self.xyz_gradient_accum,
-            torch.zeros(n_new, 3, device=device)
-        ])
-
-        self.xyz_gradient_count = torch.cat([
-            self.xyz_gradient_count,
-            torch.zeros(n_new, 1, device=device)
-        ])
-        self.max_radii_2D = torch.cat([
-            self.max_radii_2D,
-            torch.zeros(n_new, device=device)
-        ])
+        self.xyz_gradient_accum = torch.cat(
+            [self.xyz_gradient_accum, torch.zeros(n_new, 3, device=device)]
+        )
+        self.xyz_gradient_count = torch.cat(
+            [self.xyz_gradient_count, torch.zeros(n_new, 1, device=device)]
+        )
+        self.max_radii_2D = torch.cat(
+            [self.max_radii_2D, torch.zeros(n_new, device=device)]
+        )

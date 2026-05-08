@@ -10,6 +10,14 @@ from src.backends.gsplat_backend import GSplatBackend
 from src.backends.pytorch_backend import PyTorchBackend
 
 
+class _NullStream:
+    """Drop-in for torch.cuda.Stream on a CPU device — `with` is a no-op."""
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def synchronize(self): pass
+    def wait_stream(self, *a, **kw): pass
+
+
 @dataclass
 class RenderCache:
     means2d: torch.Tensor
@@ -70,16 +78,25 @@ class GaussianRasterizer:
         self.preprocessing_queue = deque(maxlen=5)
 
         self.backend = self._initialize_backend(backend, self.K)
-        self.render_stream = torch.cuda.Stream()
-        self.preprocess_stream = torch.cuda.Stream()
+        if self.device.type == "cuda" and torch.cuda.is_available():
+            self.render_stream = torch.cuda.Stream()
+            self.preprocess_stream = torch.cuda.Stream()
+        else:
+            self.render_stream = _NullStream()
+            self.preprocess_stream = _NullStream()
 
-        self._project_gaussians_compiled = torch.compile(
-            self._project_gaussians, mode="max-autotune"
+        # torch.compile only kicks in if a callable was assigned to
+        # self._project_gaussians; the trainer's render path doesn't go through
+        # it so this stays None for now.
+        self._project_gaussians_compiled = (
+            torch.compile(self._project_gaussians, mode="max-autotune")
+            if self._project_gaussians is not None
+            else None
         )
 
     def _initialize_backend(self, backend, K):
         if backend == "auto":
-            backends_to_try = ["gplat", "pytorch"]
+            backends_to_try = ["gsplat", "pytorch"]
         else:
             backends_to_try = [backend]
 
