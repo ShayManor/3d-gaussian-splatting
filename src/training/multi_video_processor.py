@@ -87,8 +87,17 @@ class MultiVideoProcessor:
 
         sfm_data["frame_indices"] = np.array(frame_indices, dtype=int)[local_pose_ids]
 
-        print("RAW SFM pose[0]:\n", sfm_data["poses"][0])
-        print("RAW SFM pose[1]:\n", sfm_data["poses"][1])
+        n_poses = len(sfm_data["poses"])
+        n_pts = len(sfm_data["points_3d"])
+        log(INFO, f"SfM result: {n_poses} poses, {n_pts} 3D points")
+        if n_poses < 2 or n_pts == 0:
+            log(
+                WARNING,
+                "SfM produced too few poses/points — every candidate pair was rejected. "
+                "Check the per-gate breakdown logged by VideoSFM above. Common causes: "
+                "video too still (lower MIN_FLOW_PX or use larger stride), too low resolution, "
+                "or weak texture (try matcher='loftr' if a GPU is available).",
+            )
 
         return sfm_data
 

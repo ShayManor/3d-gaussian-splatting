@@ -54,9 +54,21 @@ class VideoSFM:
         prev_track_widx = np.empty((0,), dtype=np.int64)
 
         prev_frame_idx = frame_indices[0]
-        n_dupes = 0
-        n_pnp_fail = 0
         first_pair_done = False
+
+        # Per-gate skip counters so the user can see which gate is the bottleneck.
+        skips = {
+            "too_similar": 0,
+            "few_matches": 0,
+            "pose_recovery_failed": 0,
+            "low_inliers_or_flow": 0,
+            "triangulation_empty": 0,
+            "triangulation_too_few": 0,
+            "klt_failed": 0,
+            "pnp_too_few_tracks": 0,
+            "pnp_failed": 0,
+            "trivial_motion": 0,
+        }
 
         # Gates tuned for SIFT (sparse, conservative). LoFTR/dense matchers
         # comfortably exceed these on the first pair too.
@@ -73,14 +85,14 @@ class VideoSFM:
             tqdm(frame_indices[1:], total=len(frame_indices) - 1, desc="Processing pairs"), 1
         ):
             if self._too_similar(frames[prev_frame_idx], frames[frame_idx]):
-                n_dupes += 1
+                skips["too_similar"] += 1
                 continue
 
             matches = self.calibrator.extract_all_matches(
                 [frames[prev_frame_idx], frames[frame_idx]]
             )
             if not matches or len(matches[0]["pts1"]) < MIN_MATCHES:
-                n_dupes += 1
+                skips["few_matches"] += 1
                 continue
 
             pts1, pts2 = matches[0]["pts1"], matches[0]["pts2"]
@@ -88,7 +100,7 @@ class VideoSFM:
             if not first_pair_done:
                 R_rel, t_rel, inliers = self.estimate_pose_from_matches(pts1, pts2, K)
                 if R_rel is None:
-                    n_dupes += 1
+                    skips["pose_recovery_failed"] += 1
                     continue
 
                 ninl = int(np.count_nonzero(inliers))
@@ -97,7 +109,7 @@ class VideoSFM:
                     if ninl else 0.0
                 )
                 if ninl < MIN_INLIERS or flow_med < MIN_FLOW_PX:
-                    n_dupes += 1
+                    skips["low_inliers_or_flow"] += 1
                     continue
 
                 pts1_in = pts1[inliers]
@@ -113,11 +125,11 @@ class VideoSFM:
                     pts1_in, pts2_in, K, poses[-1], absolute_pose, MAX_REPROJ_PX
                 )
                 if tri is None:
-                    n_dupes += 1
+                    skips["triangulation_empty"] += 1
                     continue
                 X_world, kept = tri
                 if len(X_world) < MIN_INLIERS // 2:
-                    n_dupes += 1
+                    skips["triangulation_too_few"] += 1
                     continue
 
                 start = len(points_3d)
@@ -143,8 +155,7 @@ class VideoSFM:
                 criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 1e-3),
             )
             if kp_out is None or st is None:
-                n_pnp_fail += 1
-                n_dupes += 1
+                skips["klt_failed"] += 1
                 continue
             st = st.reshape(-1).astype(bool)
             kp_out = kp_out.reshape(-1, 2)
@@ -155,8 +166,7 @@ class VideoSFM:
             valid = st & in_img
 
             if int(valid.sum()) < MIN_PNP_TRACKS:
-                n_pnp_fail += 1
-                n_dupes += 1
+                skips["pnp_too_few_tracks"] += 1
                 continue
 
             tracked_widx = prev_track_widx[valid]
@@ -175,8 +185,7 @@ class VideoSFM:
                 flags=cv2.SOLVEPNP_EPNP,
             )
             if not ok or pnp_inl is None or len(pnp_inl) < MIN_PNP_TRACKS:
-                n_pnp_fail += 1
-                n_dupes += 1
+                skips["pnp_failed"] += 1
                 continue
 
             pnp_inl = pnp_inl.ravel()
@@ -191,7 +200,7 @@ class VideoSFM:
             # Sanity: motion since the previous accepted pose must be non-trivial.
             T_rel = absolute_pose @ np.linalg.inv(poses[-1])
             if np.linalg.norm(T_rel[:3, 3]) < 1e-3:
-                n_dupes += 1
+                skips["trivial_motion"] += 1
                 continue
 
             # Discover new points via LoFTR matches in this pair, excluding any
@@ -230,11 +239,17 @@ class VideoSFM:
             prev_track_widx = np.concatenate([carried_widx, new_widx])
             prev_frame_idx = frame_idx
 
-        log(INFO, f"SFM complete: {len(poses)} poses, {len(points_3d)} 3D points (PnP fails: {n_pnp_fail})")
-        if n_dupes > 0.3 * (len(frame_indices) - 1):
-            log(WARNING, f"Number of dupes (skip failures): {n_dupes}")
-        else:
-            log(INFO, f"Number of dupes (skip failures): {n_dupes}")
+        n_candidates = max(len(frame_indices) - 1, 1)
+        n_skipped = sum(skips.values())
+        log(
+            INFO,
+            f"SFM complete: {len(poses)} poses, {len(points_3d)} 3D points "
+            f"(skipped {n_skipped}/{n_candidates} candidates)",
+        )
+        if n_skipped > 0:
+            breakdown = ", ".join(f"{k}={v}" for k, v in skips.items() if v > 0)
+            level = WARNING if (len(poses) < 2 or n_skipped > 0.5 * n_candidates) else INFO
+            log(level, f"Skip breakdown: {breakdown}")
 
         poses_arr = np.array(poses)
         return {
