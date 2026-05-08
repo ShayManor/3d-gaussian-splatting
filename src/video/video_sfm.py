@@ -2,7 +2,6 @@ from logging import log, WARNING, INFO, DEBUG
 
 import cv2
 import numpy as np
-from lightglue import SuperPoint, LightGlue
 from scipy.spatial import cKDTree
 from tqdm import tqdm
 
@@ -15,8 +14,6 @@ class VideoSFM:
     """
 
     def __init__(self, device="cuda", matcher="sift"):
-        self.extractor = SuperPoint().eval().to(device)  # More robust to changes
-        self.matcher = LightGlue(features="superpoint").eval().to(device)
         self.calibrator = Calibrator(matcher)
 
 
