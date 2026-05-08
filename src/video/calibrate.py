@@ -292,10 +292,14 @@ class Calibrator:
         Validates that intrinsics are accurate and checks error
         :param K: Intrinsics
         :param matches: Matches precomputed
-        :return: mean_error
+        :return: mean_error (inf when no usable matches)
         """
+        if not matches:
+            log(WARNING, "validate_intrinsics: no matches; skipping (returns inf)")
+            return float("inf")
         errors = []
-        sampled_matches = np.random.choice(matches, 5, replace=False)
+        n_sample = min(5, len(matches))
+        sampled_matches = np.random.choice(matches, n_sample, replace=False)
         for match in sampled_matches:
             pts1 = match["pts1"]
             pts2 = match["pts2"]
