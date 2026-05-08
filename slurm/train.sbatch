@@ -25,16 +25,9 @@ export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 unset DISPLAY
 cd "$REPO"
 
-# W&B credentials. Put your key in $SCRATCH/.wandb_api_key (mode 600) or
-# export WANDB_API_KEY before sbatch. Falls back to offline if missing so the
-# job still runs and you can `wandb sync` later.
-if [ -z "${WANDB_API_KEY:-}" ] && [ -f "$SCRATCH/.wandb_api_key" ]; then
-  export WANDB_API_KEY=$(cat "$SCRATCH/.wandb_api_key")
-fi
 export WANDB_DIR="${WANDB_DIR:-$SCRATCH/wandb}"
 mkdir -p "$WANDB_DIR"
-WANDB_MODE="${WANDB_MODE:-online}"
-[ -z "${WANDB_API_KEY:-}" ] && WANDB_MODE=offline && echo "[wandb] no API key -> offline mode"
+export WANDB_MODE="${WANDB_MODE:-online}"
 
 VIDEO="${VIDEO:-./data/input.mp4}"
 OUTPUT="${OUTPUT:-runs/3dgs_j${SLURM_JOB_ID}}"
