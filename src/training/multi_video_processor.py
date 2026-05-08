@@ -43,11 +43,8 @@ class MultiVideoProcessor:
 
         for video_path in tqdm(video_paths, desc="Processing videos"):
             video_cache = self.cache_dir / f"{Path(video_path).stem}_sfm.pkl"
-            if use_cache and video_cache.exists():
-                log(INFO, f"Using cached SFM from {self.cache_dir}")
-                with open(video_cache, "rb") as f:
-                    video_data = pickle.load(f)
-            else:
+            video_data = self._maybe_load_cache(video_cache) if use_cache else None
+            if video_data is None:
                 video_data = self._process_single_video(video_path, stride, self.matcher)
                 with open(video_cache, "wb") as f:
                     pickle.dump(video_data, f)
@@ -56,6 +53,34 @@ class MultiVideoProcessor:
 
         merged_data = self._merge_videos(all_video_data)
         return merged_data
+
+    def _maybe_load_cache(self, video_cache: Path):
+        """
+        Load and validate a per-video SfM cache. Returns the dict if it has
+        plausible content (>=2 poses and >0 3D points), else None so the caller
+        can fall back to re-running SfM. Caches written by failed runs are
+        common; treating them as authoritative leads to training from random
+        gaussians on a bad scene_extent.
+        """
+        if not video_cache.exists():
+            return None
+        try:
+            with open(video_cache, "rb") as f:
+                cached = pickle.load(f)
+        except Exception as e:
+            log(WARNING, f"Failed to read cache {video_cache} ({e}); re-running SfM")
+            return None
+        n_poses = len(cached.get("poses", []))
+        n_pts = len(cached.get("points_3d", []))
+        if n_poses >= 2 and n_pts > 0:
+            log(INFO, f"Using cached SFM from {video_cache} ({n_poses} poses, {n_pts} pts)")
+            return cached
+        log(
+            WARNING,
+            f"Discarding degenerate cache {video_cache} "
+            f"({n_poses} poses, {n_pts} pts) and re-running SfM",
+        )
+        return None
 
     def _process_single_video(self, video_path: str, stride: int, matcher) -> Dict:
         """
