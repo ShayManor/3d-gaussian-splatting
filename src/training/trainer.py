@@ -518,11 +518,80 @@ class GaussianTrainer:
 
     # ----- Main training --------------------------------------------------
 
+    def _compute_scene_geometry(self, merged_data):
+        """
+        Compute robust scene_extent (median radius from median centroid, capped
+        by 2 × median camera depth), the bbox dimensions, and a list of point
+        depths. Returns (scene_extent, scene_bbox, n_outliers_beyond_extent,
+        median_depth, in_extent_mask).
+
+        in_extent_mask is per-point: True for points within scene_extent of
+        the median centroid. Caller can use this to filter the SfM cloud
+        before initializing gaussians, so a stale cache with bad triangulations
+        cannot seed gaussians at z=5000+.
+        """
+        points_3d = np.asarray(merged_data["points_3d"], dtype=np.float64)
+        if len(points_3d) == 0:
+            return 10.0, np.zeros(3), 0, 0.0, np.zeros(0, dtype=bool)
+
+        centroid = np.median(points_3d, axis=0)
+        radii = np.linalg.norm(points_3d - centroid, axis=1)
+        scene_bbox = points_3d.max(0) - points_3d.min(0)
+
+        if len(radii) >= 8 and np.isfinite(radii).any():
+            med_radius = float(np.median(radii[np.isfinite(radii)]))
+            depths = []
+            Xh = np.hstack([points_3d, np.ones((len(points_3d), 1))])
+            for p_arr in merged_data["all_poses"]:
+                for pose in p_arr:
+                    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                        z = (pose @ Xh.T).T[:, 2]
+                    z = z[(z > 0) & np.isfinite(z)]
+                    if len(z):
+                        depths.append(float(np.median(z)))
+            depth_cap = 2.0 * float(np.median(depths)) if depths else float("inf")
+            scene_extent = float(min(2.0 * med_radius, depth_cap))
+            median_depth = float(np.median(depths)) if depths else 0.0
+        else:
+            scene_extent = float(np.linalg.norm(scene_bbox))
+            median_depth = 0.0
+
+        in_extent = radii <= scene_extent
+        n_outliers = int((~in_extent).sum())
+        return scene_extent, scene_bbox, n_outliers, median_depth, in_extent
+
+    def _filter_merged_by_extent(self, merged_data, in_extent_mask):
+        """
+        Drop SfM points (and their colors) that lie outside scene_extent of the
+        median centroid. Returns a shallow copy of merged_data with the cloud
+        filtered. Poses, intrinsics, and frame indices are untouched.
+        """
+        if in_extent_mask.all() or len(in_extent_mask) == 0:
+            return merged_data
+        filtered = dict(merged_data)
+        filtered["points_3d"] = np.asarray(merged_data["points_3d"])[in_extent_mask]
+        if "colors" in merged_data and len(merged_data["colors"]) == len(in_extent_mask):
+            filtered["colors"] = np.asarray(merged_data["colors"])[in_extent_mask]
+        return filtered
+
     def train(self, merged_data, output_dir) -> GaussianModel:
         output_path = Path(output_dir)
         output_path.mkdir(exist_ok=True, parents=True)
 
-        print(f"Initializing with {len(merged_data['points_3d'])} 3D points")
+        # Compute scene geometry FIRST so we can drop outlier SfM points before
+        # initializing gaussians. Otherwise a single point at z=5000 spawns a
+        # cluster of useless gaussians that pull every densify event downstream.
+        scene_extent, scene_bbox, n_outliers, median_depth, in_extent = (
+            self._compute_scene_geometry(merged_data)
+        )
+        log(
+            INFO,
+            f"scene_extent={scene_extent:.3f}  outliers_beyond_extent={n_outliers}/"
+            f"{len(merged_data['points_3d'])}  median_depth={median_depth:.3f}",
+        )
+        merged_data = self._filter_merged_by_extent(merged_data, in_extent)
+
+        print(f"Initializing with {len(merged_data['points_3d'])} 3D points (after outlier filter)")
 
         gaussians = self._initialize_gaussians(merged_data)
         print(f"Initialized {gaussians.xyz.shape[0]} Gaussians")
@@ -589,55 +658,10 @@ class GaussianTrainer:
             except Exception as e:
                 log(WARNING, f"wandb init image log failed: {e}")
 
-        # Scene extent for densification — robust to triangulation outliers.
-        # Strategy: take the median position as the centroid, the median radius
-        # from that centroid as a robust scale, multiply by 2 (≈ "diameter").
-        # Median is impervious to a long tail of near-infinity points; the
-        # naive bbox.max() and even 95th-percentile distance get pulled by
-        # outliers. We also cap by 2*median camera-to-point depth as a sanity
-        # ceiling for handheld/orbit videos.
-        points_3d = merged_data["points_3d"]
-        if len(points_3d):
-            centroid = np.median(points_3d, axis=0)
-            radii = np.linalg.norm(points_3d - centroid, axis=1)
-            radii_finite = radii[np.isfinite(radii)]
-            if len(radii_finite) >= 8:
-                med_radius = float(np.median(radii_finite))
-                # Camera-to-point depth median across all (pose, point) pairs
-                # gives an additional cap based on actual viewing geometry.
-                depths = []
-                for p_arr in merged_data["all_poses"]:
-                    Xh = np.hstack([points_3d, np.ones((len(points_3d), 1))])
-                    for pose in p_arr:
-                        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-                            z = (pose @ Xh.T).T[:, 2]
-                        z = z[(z > 0) & np.isfinite(z)]
-                        if len(z):
-                            depths.append(float(np.median(z)))
-                depth_cap = 2.0 * float(np.median(depths)) if depths else float("inf")
-                scene_extent = float(min(2.0 * med_radius, depth_cap))
-                n_outliers = int((radii > scene_extent).sum())
-            else:
-                scene_extent = float(np.linalg.norm(points_3d.max(0) - points_3d.min(0)))
-                n_outliers = 0
-            scene_bbox = points_3d.max(0) - points_3d.min(0)
-        else:
-            scene_extent = 10.0
-            n_outliers = 0
-            scene_bbox = np.array([0.0, 0.0, 0.0])
-        log(INFO, f"scene_extent={scene_extent:.3f}  outliers_beyond_extent={n_outliers}/{len(points_3d)}")
-
-        # SfM dataset stats logged once at iter 0
-        if self.wandb_run is not None and len(points_3d):
+        # SfM scene stats logged once at iter 0 (scene_extent already computed
+        # at the top of train(); the merged cloud here is post-filter).
+        if self.wandb_run is not None and len(merged_data["points_3d"]):
             try:
-                depths = []
-                for p_arr in merged_data["all_poses"]:
-                    for pose in p_arr:
-                        Xh = np.hstack([points_3d, np.ones((len(points_3d), 1))])
-                        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-                            Xc = (pose @ Xh.T).T
-                        z = Xc[:, 2]
-                        depths.append(np.median(z[(z > 0) & np.isfinite(z)]))
                 self._wandb_log(
                     {
                         "scene/extent": scene_extent,
@@ -645,8 +669,9 @@ class GaussianTrainer:
                         "scene/bbox_x": float(scene_bbox[0]),
                         "scene/bbox_y": float(scene_bbox[1]),
                         "scene/bbox_z": float(scene_bbox[2]),
-                        "scene/median_depth": float(np.median(depths)) if depths else 0.0,
+                        "scene/median_depth": median_depth,
                         "scene/n_cameras": int(sum(len(p) for p in merged_data["all_poses"])),
+                        "scene/n_points_kept": int(len(merged_data["points_3d"])),
                     },
                     step=0,
                 )
