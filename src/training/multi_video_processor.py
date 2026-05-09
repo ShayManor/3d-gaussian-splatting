@@ -57,10 +57,12 @@ class MultiVideoProcessor:
     def _maybe_load_cache(self, video_cache: Path):
         """
         Load and validate a per-video SfM cache. Returns the dict if it has
-        plausible content (>=2 poses and >0 3D points), else None so the caller
-        can fall back to re-running SfM. Caches written by failed runs are
-        common; treating them as authoritative leads to training from random
-        gaussians on a bad scene_extent.
+        plausible content, else None so the caller can fall back to re-running
+        SfM. We reject:
+          * fewer than 2 poses or 0 points (degenerate)
+          * a cloud whose bbox dwarfs its median radius (a few near-infinity
+            triangulations slipping past the reproj filter — these poison the
+            scene_extent and make densify thresholds unusable)
         """
         if not video_cache.exists():
             return None
@@ -71,16 +73,35 @@ class MultiVideoProcessor:
             log(WARNING, f"Failed to read cache {video_cache} ({e}); re-running SfM")
             return None
         n_poses = len(cached.get("poses", []))
-        n_pts = len(cached.get("points_3d", []))
-        if n_poses >= 2 and n_pts > 0:
-            log(INFO, f"Using cached SFM from {video_cache} ({n_poses} poses, {n_pts} pts)")
-            return cached
-        log(
-            WARNING,
-            f"Discarding degenerate cache {video_cache} "
-            f"({n_poses} poses, {n_pts} pts) and re-running SfM",
-        )
-        return None
+        pts = np.asarray(cached.get("points_3d", []))
+        n_pts = len(pts)
+        if n_poses < 2 or n_pts == 0:
+            log(
+                WARNING,
+                f"Discarding degenerate cache {video_cache} "
+                f"({n_poses} poses, {n_pts} pts) and re-running SfM",
+            )
+            return None
+        if n_pts >= 8:
+            centroid = np.median(pts, axis=0)
+            radii = np.linalg.norm(pts - centroid, axis=1)
+            radii = radii[np.isfinite(radii)]
+            if len(radii):
+                med_radius = float(np.median(radii))
+                bbox_diag = float(np.linalg.norm(pts.max(0) - pts.min(0)))
+                # Healthy clouds have bbox_diag/med_radius around 5–30.
+                # Outlier-poisoned clouds (bbox_z ~10000 with median radius ~5)
+                # blow this ratio past 100.
+                if med_radius > 0 and bbox_diag / med_radius > 100:
+                    log(
+                        WARNING,
+                        f"Discarding cache {video_cache}: bbox_diag={bbox_diag:.0f} "
+                        f"≫ median_radius={med_radius:.2f} "
+                        f"(ratio={bbox_diag/med_radius:.0f}, likely outlier triangulations)",
+                    )
+                    return None
+        log(INFO, f"Using cached SFM from {video_cache} ({n_poses} poses, {n_pts} pts)")
+        return cached
 
     def _process_single_video(self, video_path: str, stride: int, matcher) -> Dict:
         """
