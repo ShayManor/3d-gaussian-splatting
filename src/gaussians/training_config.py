@@ -29,6 +29,14 @@ class TrainingConfig:
     densify_clone_extent_ratio: float = 0.1
     # max_scale  > extent * prune_extent_ratio -> "too big" prune candidate
     densify_prune_extent_ratio: float = 2.0
+    # Cap on densify-event growth: at most this fraction of the current
+    # population may be added per event. Higher-gradient candidates win.
+    densify_max_growth_ratio: float = 0.05
+    # Per-step hard cap on gaussian scale, expressed as a fraction of
+    # scene_extent. After every optimizer.step() the scaling param is
+    # clamped to log(scene_extent * scale_clamp_ratio) so individual
+    # gaussians can't grow huge to "blanket" reconstruction error.
+    scale_clamp_ratio: float = 0.2
 
     # Training config
     iterations_per_video: int = 3e5

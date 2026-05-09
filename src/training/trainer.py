@@ -707,6 +707,7 @@ class GaussianTrainer:
                     optimizer=optimizer,
                     clone_extent_ratio=self.config.densify_clone_extent_ratio,
                     prune_extent_ratio=self.config.densify_prune_extent_ratio,
+                    max_growth_ratio=self.config.densify_max_growth_ratio,
                 )
                 self._wandb_log(
                     {
@@ -736,6 +737,13 @@ class GaussianTrainer:
                     )
 
             lr_xyz = self._update_learning_rate(optimizer)
+
+            # Hard cap on gaussian scale: prevents the "blanket" failure mode
+            # where a gaussian grows to scene_extent magnitude to cover error
+            # it can't cover by repositioning (under-constrained scenes).
+            with torch.no_grad():
+                scale_ceiling = math.log(scene_extent * self.config.scale_clamp_ratio + 1e-9)
+                gaussians.scaling.data.clamp_(max=scale_ceiling)
 
             # Per-step bookkeeping (cheap)
             if self.iteration % 10 == 0:
