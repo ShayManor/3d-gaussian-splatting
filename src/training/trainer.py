@@ -590,17 +590,32 @@ class GaussianTrainer:
                 log(WARNING, f"wandb init image log failed: {e}")
 
         # Scene extent for densification — robust to triangulation outliers.
-        # Naive bbox.max() blows up when a few SfM points land at near-infinity,
-        # which collapses the densify thresholds (everything qualifies for
-        # cloning, nothing for splitting/pruning).
+        # Strategy: take the median position as the centroid, the median radius
+        # from that centroid as a robust scale, multiply by 2 (≈ "diameter").
+        # Median is impervious to a long tail of near-infinity points; the
+        # naive bbox.max() and even 95th-percentile distance get pulled by
+        # outliers. We also cap by 2*median camera-to-point depth as a sanity
+        # ceiling for handheld/orbit videos.
         points_3d = merged_data["points_3d"]
         if len(points_3d):
             centroid = np.median(points_3d, axis=0)
             radii = np.linalg.norm(points_3d - centroid, axis=1)
             radii_finite = radii[np.isfinite(radii)]
             if len(radii_finite) >= 8:
-                # 95th-percentile radius * 2 ≈ "diameter of the inlier cloud"
-                scene_extent = float(2.0 * np.percentile(radii_finite, 95))
+                med_radius = float(np.median(radii_finite))
+                # Camera-to-point depth median across all (pose, point) pairs
+                # gives an additional cap based on actual viewing geometry.
+                depths = []
+                for p_arr in merged_data["all_poses"]:
+                    Xh = np.hstack([points_3d, np.ones((len(points_3d), 1))])
+                    for pose in p_arr:
+                        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                            z = (pose @ Xh.T).T[:, 2]
+                        z = z[(z > 0) & np.isfinite(z)]
+                        if len(z):
+                            depths.append(float(np.median(z)))
+                depth_cap = 2.0 * float(np.median(depths)) if depths else float("inf")
+                scene_extent = float(min(2.0 * med_radius, depth_cap))
                 n_outliers = int((radii > scene_extent).sum())
             else:
                 scene_extent = float(np.linalg.norm(points_3d.max(0) - points_3d.min(0)))
@@ -610,7 +625,7 @@ class GaussianTrainer:
             scene_extent = 10.0
             n_outliers = 0
             scene_bbox = np.array([0.0, 0.0, 0.0])
-        log(INFO, f"scene_extent={scene_extent:.3f}  outliers_dropped={n_outliers}/{len(points_3d)}")
+        log(INFO, f"scene_extent={scene_extent:.3f}  outliers_beyond_extent={n_outliers}/{len(points_3d)}")
 
         # SfM dataset stats logged once at iter 0
         if self.wandb_run is not None and len(points_3d):

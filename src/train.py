@@ -45,6 +45,16 @@ def main():
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training")
     parser.add_argument("--matcher", type=str, default="sift", help="Matcher: sift | loftr | opencv")
 
+    # Gaussian / densify knobs (override TrainingConfig defaults)
+    parser.add_argument("--initial_gaussians", type=int, default=None,
+                        help="Initial gaussian count (default from TrainingConfig)")
+    parser.add_argument("--max_gaussians", type=int, default=None,
+                        help="Max gaussian count cap (default from TrainingConfig)")
+    parser.add_argument("--densify_clone_extent_ratio", type=float, default=None,
+                        help="Clone if max_scale <= extent * ratio (default 0.1)")
+    parser.add_argument("--densify_prune_extent_ratio", type=float, default=None,
+                        help="Prune if max_scale > extent * ratio (default 2.0)")
+
     # W&B flags
     parser.add_argument("--wandb_project", default="3d-gaussian-splatting")
     parser.add_argument("--wandb_entity", default=None)
@@ -65,6 +75,14 @@ def main():
     config.distributed = args.distributed
     config.batch_size = args.batch_size
     config.matcher = args.matcher
+    if args.initial_gaussians is not None:
+        config.initial_gaussians = args.initial_gaussians
+    if args.max_gaussians is not None:
+        config.max_gaussians = args.max_gaussians
+    if args.densify_clone_extent_ratio is not None:
+        config.densify_clone_extent_ratio = args.densify_clone_extent_ratio
+    if args.densify_prune_extent_ratio is not None:
+        config.densify_prune_extent_ratio = args.densify_prune_extent_ratio
     config.wandb_project = args.wandb_project
     config.wandb_entity = args.wandb_entity
     config.wandb_mode = args.wandb_mode

@@ -36,6 +36,10 @@ STRIDE="${STRIDE:-5}"
 ITERATIONS="${ITERATIONS:-300000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 MATCHER="${MATCHER:-loftr}"
+INITIAL_GAUSSIANS="${INITIAL_GAUSSIANS:-10000}"
+MAX_GAUSSIANS="${MAX_GAUSSIANS:-2000000}"
+DENSIFY_CLONE_RATIO="${DENSIFY_CLONE_RATIO:-0.005}"
+DENSIFY_PRUNE_RATIO="${DENSIFY_PRUNE_RATIO:-0.5}"
 WANDB_PROJECT="${WANDB_PROJECT:-3d-gaussian-splatting}"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-3dgs_j${SLURM_JOB_ID}}"
 
@@ -51,6 +55,10 @@ python -u -m src.train \
     --iterations "$ITERATIONS" \
     --batch_size "$BATCH_SIZE" \
     --matcher "$MATCHER" \
+    --initial_gaussians "$INITIAL_GAUSSIANS" \
+    --max_gaussians "$MAX_GAUSSIANS" \
+    --densify_clone_extent_ratio "$DENSIFY_CLONE_RATIO" \
+    --densify_prune_extent_ratio "$DENSIFY_PRUNE_RATIO" \
     --wandb_project "$WANDB_PROJECT" \
     --wandb_mode "$WANDB_MODE" \
     --wandb_run_name "$WANDB_RUN_NAME" \

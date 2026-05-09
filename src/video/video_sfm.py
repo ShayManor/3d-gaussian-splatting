@@ -84,7 +84,9 @@ class VideoSFM:
         # KLT optical-flow tracking carries sub-pixel positions; 6 px guards
         # against drift in the LoFTR-grid case where match positions also wobble.
         TRACK_RADIUS_PX = 6.0
-        MAX_REPROJ_PX = 2.0
+        # Tighter reprojection (was 2.0) to reject near-infinity triangulations
+        # that survive cheirality but inflate scene_extent downstream.
+        MAX_REPROJ_PX = 1.0
 
         # Diagnostic: collect raw match counts so the user can see the actual
         # distribution when most pairs fail.
@@ -268,7 +270,7 @@ class VideoSFM:
                 f"Match count distribution over {len(mc)} attempted pairs: "
                 f"min={mc.min()} p25={int(np.percentile(mc,25))} "
                 f"median={int(np.median(mc))} p75={int(np.percentile(mc,75))} "
-                f"max={mc.max()} (gate MIN_MATCHES=8)",
+                f"max={mc.max()} (gate MIN_MATCHES={MIN_MATCHES})",
             )
 
         poses_arr = np.array(poses)
