@@ -30,8 +30,9 @@ mkdir -p "$WANDB_DIR"
 export WANDB_MODE="${WANDB_MODE:-online}"
 
 VIDEO="${VIDEO:-./data/input.mp4}"
-OUTPUT="${OUTPUT:-runs/3dgs_j${SLURM_JOB_ID}}"
-CACHE_DIR="${CACHE_DIR:-./cache}"
+# Big artifacts (checkpoints, PLYs) live on $SCRATCH — $HOME has tight quota.
+OUTPUT="${OUTPUT:-$SCRATCH/3dgs/runs/3dgs_j${SLURM_JOB_ID}}"
+CACHE_DIR="${CACHE_DIR:-$SCRATCH/3dgs/cache}"
 STRIDE="${STRIDE:-5}"
 ITERATIONS="${ITERATIONS:-300000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
