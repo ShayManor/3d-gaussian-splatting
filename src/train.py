@@ -44,6 +44,11 @@ def main():
     parser.add_argument("--distributed", type=bool, default=False)
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size for training")
     parser.add_argument("--matcher", type=str, default="sift", help="Matcher: sift | loftr | opencv")
+    parser.add_argument("--focal_px", type=float, default=None,
+                        help="Override focal length in pixels (skips 1.2*max(W,H) heuristic)")
+    parser.add_argument("--focal_35mm", type=float, default=None,
+                        help="Override focal length as 35mm-equivalent mm (e.g. 24 for iPhone 17 main). "
+                             "Converts to pixels via f_px = (focal_35mm/36) * max(W,H).")
 
     # Gaussian / densify knobs (override TrainingConfig defaults)
     parser.add_argument("--initial_gaussians", type=int, default=None,
@@ -104,6 +109,8 @@ def main():
         cache=args.cache_dir,
         device=args.device,
         matcher=config.matcher,
+        focal_px=args.focal_px,
+        focal_35mm=args.focal_35mm,
     )
     merged_data = processor.process_videos(args.videos, stride=args.stride, use_cache=True)
 

@@ -6,11 +6,20 @@ from logging import log, INFO, WARNING
 
 
 class Calibrator:
-    def __init__(self, matcher="sift"):
+    def __init__(self, matcher="sift", focal_px=None, focal_35mm=None):
         """
-        Initializes camera calibrator with matcher type
-        :param matcher: Uses loftr if available, otherwise OpenCV
+        Initializes camera calibrator with matcher type.
+
+        focal_px overrides the heuristic `1.2 * max(W, H)`. focal_35mm gives the
+        same override expressed in 35mm-equivalent millimeters (e.g. iPhone 17
+        main camera = 24); converted via f_px = (focal_35mm / 36) * max(W, H).
+        Pass at most one. None on both falls back to the heuristic.
         """
+        if focal_px is not None and focal_35mm is not None:
+            raise ValueError("Pass focal_px OR focal_35mm, not both")
+        self.focal_px = float(focal_px) if focal_px is not None else None
+        self.focal_35mm = float(focal_35mm) if focal_35mm is not None else None
+
         self.loftr = None
         self.matcher = None
         self.alg = None
@@ -275,10 +284,16 @@ class Calibrator:
 
     def validate_intrinsics(self, K, matches):
         """
-        Validates that intrinsics are accurate and checks error
-        :param K: Intrinsics
-        :param matches: Matches precomputed
-        :return: mean_error (inf when no usable matches)
+        Reports mean Sampson distance (pixel-space symmetric epipolar error) on
+        RANSAC inliers. Independent of K — F is computed from pixel matches and
+        the line `l = F @ pt1_h` lives in pixel coords. Earlier versions used
+        E = K^T F K to build the line, which conflates pixel and normalized
+        coords and produces a K-dependent number that scales with the focal
+        length (so a too-large focal heuristic inflated this metric).
+
+        Threshold rule of thumb: <1 px clean, 1-3 px acceptable, >3 px implies
+        a matching or geometry problem (NOT bad K — this metric doesn't depend
+        on K).
         """
         if not matches:
             log(WARNING, "validate_intrinsics: no matches; skipping (returns inf)")
@@ -294,28 +309,26 @@ class Calibrator:
                 log(WARNING, "Small points")
                 continue
 
-            # Compute Fundamental matrix from point correspondences
             F, mask = cv2.findFundamentalMat(pts1, pts2, cv2.FM_RANSAC, 1.0, 0.99)
-
             if F is None:
                 log(WARNING, "Fundamental Matrix is None")
                 continue
 
-            # Essential matrix
-            E = K.T @ F @ K
-
             for i in range(len(pts1)):
-                if mask[i]:
-                    pt1_h = np.append(pts1[i], 1)
-                    pt2_h = np.append(pts2[i], 1)
+                if not mask[i]:
+                    continue
+                pt1_h = np.append(pts1[i], 1.0)
+                pt2_h = np.append(pts2[i], 1.0)
 
-                    # Epipolar line in second image
-                    l = E @ pt1_h
-
-                    # Distance from pt2 to line
-                    err = abs(np.dot(l, pt2_h)) / (np.linalg.norm(l[:2]) + 1e-8)
-                    errors.append(err)
-        return np.mean(errors) if errors else float("inf")
+                # Symmetric epipolar (Sampson) distance: average pixel-space
+                # distance from each point to the epipolar line induced by
+                # its match in the other image.
+                l2 = F @ pt1_h          # epipolar line in image 2
+                l1 = F.T @ pt2_h        # epipolar line in image 1
+                d2 = abs(float(pt2_h @ l2)) / (np.linalg.norm(l2[:2]) + 1e-8)
+                d1 = abs(float(pt1_h @ l1)) / (np.linalg.norm(l1[:2]) + 1e-8)
+                errors.append(0.5 * (d1 + d2))
+        return float(np.mean(errors)) if errors else float("inf")
 
     def identify_intrinsics(self, frames, video_path):
         """
@@ -331,19 +344,25 @@ class Calibrator:
         width = capture.get(cv2.CAP_PROP_FRAME_WIDTH)
         height = capture.get(cv2.CAP_PROP_FRAME_HEIGHT)
 
-        # COLMAP initial guess formula - works surprisingly well
-        initial_focal = 1.2 * max(width, height)
+        # Heuristic 1.2*max assumes ~45° FOV and is way off for phones (iPhone
+        # main camera at 24mm-equiv has ~74° FOV → true f ≈ 0.67*max). Allow
+        # explicit override via focal_px or focal_35mm.
+        if self.focal_px is not None:
+            initial_focal = self.focal_px
+            source = "user override (focal_px)"
+        elif self.focal_35mm is not None:
+            initial_focal = (self.focal_35mm / 36.0) * max(width, height)
+            source = f"user override (focal_35mm={self.focal_35mm})"
+        else:
+            initial_focal = 1.2 * max(width, height)
+            source = "heuristic 1.2*max(W,H)"
 
-        # IPhone approximate FOV
-        # fov = 72.0
-        # initial_focal = height / (2 * math.tan(math.radians(fov / 2)))
-        # Principle points of camera
         cx, cy = width / 2, height / 2
         K_init = np.array(
             [[initial_focal, 0, cx], [0, initial_focal, cy], [0, 0, 1]]
-        )  # https://ksimek.github.io/2013/08/13/intrinsic
+        )
 
-        log(INFO, f"Initial guess: focal={initial_focal:.1f}")
+        log(INFO, f"Focal: {initial_focal:.1f} px [{source}] (frame {int(width)}x{int(height)})")
 
         matches = self.extract_all_matches(frames)
         log(INFO, f"Number of matches: {len(matches)}")

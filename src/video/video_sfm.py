@@ -13,8 +13,8 @@ class VideoSFM:
     Class representing one video and getting the structure from frames
     """
 
-    def __init__(self, device="cuda", matcher="sift"):
-        self.calibrator = Calibrator(matcher)
+    def __init__(self, device="cuda", matcher="sift", focal_px=None, focal_35mm=None):
+        self.calibrator = Calibrator(matcher, focal_px=focal_px, focal_35mm=focal_35mm)
 
 
     def process_video_frames(self, frames, video_path, stride=5):

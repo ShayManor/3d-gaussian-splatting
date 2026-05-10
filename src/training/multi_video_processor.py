@@ -18,10 +18,20 @@ class MultiVideoProcessor:
     Processes multiple videos in order and turns them into one coordinate system.
     """
 
-    def __init__(self, cache="./cache", device="cuda", max_frames_per_video=100_000, matcher="sift"):
+    def __init__(
+        self,
+        cache="./cache",
+        device="cuda",
+        max_frames_per_video=100_000,
+        matcher="sift",
+        focal_px=None,
+        focal_35mm=None,
+    ):
         self.cache_dir = Path(cache)
         self.use_cache = True
         self.matcher = matcher
+        self.focal_px = focal_px
+        self.focal_35mm = focal_35mm
         if self.cache_dir is None:
             self.use_cache = False
         else:
@@ -112,8 +122,13 @@ class MultiVideoProcessor:
         """
 
         ### Opencv2 video capture ###
-        loader = VideoLoader(video_path, self.use_cache) 
-        processor = VideoSFM(self.device, matcher=matcher)
+        loader = VideoLoader(video_path, self.use_cache)
+        processor = VideoSFM(
+            self.device,
+            matcher=matcher,
+            focal_px=self.focal_px,
+            focal_35mm=self.focal_35mm,
+        )
 
         num_frames = min(loader.total_frames, self.max_frames_per_video)
         frame_indices = list(range(0, num_frames, stride))
