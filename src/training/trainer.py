@@ -70,6 +70,13 @@ class GaussianTrainer:
             return 100.0
         return float(-10.0 * math.log10(mse))
 
+    @staticmethod
+    def _stclamp(x: torch.Tensor) -> torch.Tensor:
+        # Forward: clamp to [0,1] so L1/SSIM stay bounded when gsplat returns
+        # un-clamped RGB. Backward: identity, so gaussians whose SH eval drifts
+        # out of [0,1] still receive a corrective gradient.
+        return x + (x.clamp(0.0, 1.0) - x).detach()
+
     # ----- Initialization -------------------------------------------------
 
     def _initialize_gaussians(self, merged_data):
@@ -409,9 +416,10 @@ class GaussianTrainer:
                 rendered_img = rendered_img.permute(1, 2, 0)
             gt_image = view_data["image"]
 
-            l1 = F.l1_loss(rendered_img, gt_image)
+            rendered_for_loss = self._stclamp(rendered_img)
+            l1 = F.l1_loss(rendered_for_loss, gt_image)
             ssim = self._compute_ssim(
-                rendered_img.permute(2, 0, 1).unsqueeze(0),
+                rendered_for_loss.permute(2, 0, 1).unsqueeze(0),
                 gt_image.permute(2, 0, 1).unsqueeze(0),
             )
             ssim_loss = 1.0 - ssim
@@ -420,7 +428,7 @@ class GaussianTrainer:
 
             l1_total += float(l1.detach().item())
             ssim_total += float(ssim.detach().item())
-            psnr_total += self._psnr(rendered_img.detach(), gt_image.detach())
+            psnr_total += self._psnr(rendered_img.detach().clamp(0.0, 1.0), gt_image.detach())
 
         n = len(batch)
         total_loss = total_loss / n
@@ -467,6 +475,7 @@ class GaussianTrainer:
             img = res["render"]
             if img.shape[0] == 3:
                 img = img.permute(1, 2, 0)
+            img = img.clamp(0.0, 1.0)
             gt = view_t["image"]
 
             l1 = F.l1_loss(img, gt).item()
