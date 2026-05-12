@@ -16,7 +16,7 @@ class TrainingConfig:
 
     # Gaussians
     initial_gaussians: int = 1e5
-    max_gaussians: int = 5e6
+    max_gaussians: int = 1e7
     densify_interval: int = 100
     prune_interval: int = 2000
     opacity_reset_interval: int = 5000
