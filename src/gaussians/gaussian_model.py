@@ -203,14 +203,25 @@ class GaussianModel(nn.Module):
             max_scale = scales.amax(dim=-1)
             opacity = self.get_opacity.squeeze()
 
+            # Prune if EITHER weak (low opacity) OR oversized. Original 3DGS
+            # pattern. The previous `(low_op & low_grad) | too_big` was wrong:
+            # a high-grad + low-opacity gaussian is exactly what should die
+            # (rasterizer keeps using it but it isn't contributing), but the
+            # AND clause kept it alive. Combined with opacity-reset that didn't
+            # actually drive anyone toward the prune threshold, pruning was
+            # firing ~125× less often than cloning and population exploded.
             low_op = opacity < min_opacity
-            low_grad = grads_norm < grads_threshold
             too_big = max_scale > extent * prune_extent_ratio
-            prune_mask = (low_op & low_grad) | too_big
+            prune_mask = low_op | too_big
 
             if prune_mask.sum() > 0:
                 stats["pruned"] = int(prune_mask.sum().item())
+                stats["pruned_low_op"] = int(low_op.sum().item())
+                stats["pruned_too_big"] = int(too_big.sum().item())
                 self._prune_gaussians(~prune_mask, optimizer=optimizer)
+            else:
+                stats["pruned_low_op"] = 0
+                stats["pruned_too_big"] = 0
 
             # Reset gradient accumulators (sized to current N).
             self.xyz_gradient_count = torch.zeros_like(self.xyz_gradient_count)

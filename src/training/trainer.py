@@ -810,6 +810,8 @@ class GaussianTrainer:
                         "densify/cloned": stats["cloned"],
                         "densify/split": stats["split"],
                         "densify/pruned": stats["pruned"],
+                        "densify/pruned_low_op": stats.get("pruned_low_op", 0),
+                        "densify/pruned_too_big": stats.get("pruned_too_big", 0),
                         "densify/n_before": stats["n_before"],
                         "densify/n_after": stats["n_after"],
                         "densify/delta": stats["n_after"] - stats["n_before"],
@@ -825,13 +827,27 @@ class GaussianTrainer:
                 self._cum_pruned += stats["pruned"]
                 self._densify_event_idx += 1
 
-            # Periodic opacity reset
-            if self.iteration % self.config.opacity_reset_interval == 0:
+            # Periodic opacity reset. Original 3DGS pattern: reset EVERY
+            # gaussian's opacity to min(current, 0.01) so all of them have to
+            # re-earn their place via gradient signal in the next ~1000 iters.
+            # The ones that don't recover end up below `densify_min_opacity`
+            # and get pruned at the next densify event.
+            #
+            # The previous version reset only opacity > 0.98 gaussians down to
+            # 0.2 — which is 40× above the prune threshold of 0.005 — so the
+            # mechanism never actually drove pruning. Result: population grew
+            # unchecked because nothing was dying. See densify_and_prune for
+            # the matching prune_mask fix.
+            if self.iteration % self.config.opacity_reset_interval == 0 and self.iteration > 0:
                 with torch.no_grad():
-                    mask = gaussians.get_opacity > 0.98
-                    gaussians.opacity.data[mask] = torch.logit(
-                        torch.full_like(gaussians.opacity.data[mask], 0.2)
+                    current = gaussians.get_opacity
+                    target = torch.minimum(
+                        current,
+                        torch.full_like(current, 0.01),
                     )
+                    # logit(0) is -inf; clamp away from 0 before inverse-sigmoid.
+                    target = target.clamp(min=1e-6, max=1.0 - 1e-6)
+                    gaussians.opacity.data = torch.logit(target)
 
             lr_xyz = self._update_learning_rate(optimizer)
 
