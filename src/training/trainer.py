@@ -43,6 +43,10 @@ class GaussianTrainer:
         self._cum_pruned = 0
         self._densify_event_idx = 0
 
+        # Shared VideoLoader cache: populated in train() with pre-decoded frames
+        # so train batches and validation reads are dict lookups, not H.264 seeks.
+        self._video_loaders: Dict[str, "VideoLoader"] = {}
+
     # ----- W&B helpers ---------------------------------------------------
 
     def _wandb_log(self, data: Dict, step: Optional[int] = None):
@@ -69,6 +73,18 @@ class GaussianTrainer:
         if mse < 1e-10:
             return 100.0
         return float(-10.0 * math.log10(mse))
+
+    def _active_sh_degree(self) -> int:
+        """
+        Current SH degree under the warmup schedule. Starts at 0 (DC only) and
+        increments by 1 every sh_increment_interval iterations until reaching
+        sh_degree_max. Higher-order coefficients stay zero (their gradient is
+        masked out by gsplat for degrees above the current cap) until enabled.
+        """
+        return min(
+            int(self.iteration // self.config.sh_increment_interval),
+            int(self.config.sh_degree_max),
+        )
 
     @staticmethod
     def _stclamp(x: torch.Tensor) -> torch.Tensor:
@@ -203,7 +219,7 @@ class GaussianTrainer:
             poses = merged_data["all_poses"][i]
             K = merged_data["all_intrinsics"][i]
 
-            loader = VideoLoader(video_path, cache_frames=False)
+            loader = self._get_loader(video_path)
             width = int(loader.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(loader.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
@@ -251,12 +267,37 @@ class GaussianTrainer:
             "height": view["height"],
         }
 
+    def _prepare_video_loaders(self, all_views: List[Dict]):
+        """
+        Build one VideoLoader per source video and pre-decode every frame any
+        view will touch. Random-access H.264 reads cost 30–80 ms each; a single
+        sequential pass costs ~1 ms per frame. With ~100 frames at 1080×1920
+        the whole video fits in ~600 MB of CPU RAM, so we just hold it.
+        """
+        per_video: Dict[str, set] = {}
+        for v in all_views:
+            per_video.setdefault(v["video_path"], set()).add(int(v["frame_idx"]))
+        for video_path, idx_set in per_video.items():
+            loader = VideoLoader(video_path, cache_frames=True)
+            loader.preload(sorted(idx_set))
+            self._video_loaders[video_path] = loader
+            log(
+                INFO,
+                f"Pre-decoded {len(loader.frame_cache)} frames from {video_path} into RAM",
+            )
+
+    def _get_loader(self, video_path: str) -> VideoLoader:
+        loader = self._video_loaders.get(video_path)
+        if loader is None:
+            loader = VideoLoader(video_path, cache_frames=True)
+            self._video_loaders[video_path] = loader
+        return loader
+
     def _create_train_loader(self, train_views: List[Dict]):
         if not train_views:
             raise ValueError("No training views available")
 
         def gen():
-            loaders = {}
             while True:
                 indices = np.random.choice(
                     len(train_views), self.config.batch_size, replace=True
@@ -264,11 +305,7 @@ class GaussianTrainer:
                 batch = []
                 for idx in indices:
                     view = train_views[idx]
-                    if view["video_path"] not in loaders:
-                        loaders[view["video_path"]] = VideoLoader(
-                            view["video_path"], cache_frames=False
-                        )
-                    frame = loaders[view["video_path"]].get_frame(view["frame_idx"])
+                    frame = self._get_loader(view["video_path"]).get_frame(view["frame_idx"])
                     if frame is not None:
                         batch.append(self._to_tensor_view(view, frame))
                 if batch:
@@ -370,6 +407,7 @@ class GaussianTrainer:
             bg_color=torch.zeros(3, device=self.device),
             render_mode="RGB",
             device=str(self.device),
+            sh_degree=self._active_sh_degree(),
         )
 
     @staticmethod
@@ -397,6 +435,7 @@ class GaussianTrainer:
         optimizer.zero_grad()
 
         gaussian_params = self._gaussian_params(gaussians)
+        active_sh_degree = self._active_sh_degree()
 
         total_loss = torch.tensor(0.0, device=self.device)
         l1_total = 0.0
@@ -422,6 +461,7 @@ class GaussianTrainer:
                     bg_color=torch.zeros(3, device=self.device),
                     render_mode="RGB",
                     device=str(self.device),
+                    sh_degree=active_sh_degree,
                 )
 
             rendered_img = rendered["render"]
@@ -472,7 +512,6 @@ class GaussianTrainer:
         if not val_views:
             return None
 
-        loaders: Dict[str, VideoLoader] = {}
         l1_sum = 0.0
         ssim_sum = 0.0
         psnr_sum = 0.0
@@ -482,9 +521,7 @@ class GaussianTrainer:
         max_gallery = 6
 
         for view in val_views:
-            if view["video_path"] not in loaders:
-                loaders[view["video_path"]] = VideoLoader(view["video_path"], cache_frames=False)
-            frame = loaders[view["video_path"]].get_frame(view["frame_idx"])
+            frame = self._get_loader(view["video_path"]).get_frame(view["frame_idx"])
             if frame is None:
                 continue
             view_t = self._to_tensor_view(view, frame)
@@ -626,7 +663,7 @@ class GaussianTrainer:
         poses0 = merged_data["all_poses"][0]
         K0 = merged_data["all_intrinsics"][0]
         video0 = merged_data["video_info"][0]["path"]
-        frame0 = VideoLoader(video0, cache_frames=False).get_frame(0)
+        frame0 = self._get_loader(video0).get_frame(0)
         reproj_img = self.debug_reprojection(
             merged_data["points_3d"], poses0, K0, frame0,
             out_path="debug_reproj_points.png",
@@ -660,6 +697,10 @@ class GaussianTrainer:
         # Train/val split
         all_views = self._build_views(merged_data)
         train_views, val_views = self._split_views(all_views)
+        # Pre-decode every frame the train/val loops will touch. With 102 views
+        # at 1080×1920 this is ~600 MB held in CPU RAM; the per-step batch is
+        # then a dict lookup instead of an H.264 random-access seek+decode.
+        self._prepare_video_loaders(all_views)
         train_loader = self._create_train_loader(train_views)
 
         # Sanity render at iter 0 for debug PNGs
@@ -816,6 +857,7 @@ class GaussianTrainer:
                         "train/psnr": step_metrics["psnr"],
                         "train/scale_reg": step_metrics["scale_reg"],
                         "train/lr_xyz": lr_xyz,
+                        "train/sh_degree": self._active_sh_degree(),
                         **lrs,
                         "train/n_gaussians": int(gaussians.xyz.shape[0]),
                         "train/mean_opacity": float(op.mean().item()),

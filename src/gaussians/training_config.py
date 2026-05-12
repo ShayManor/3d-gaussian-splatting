@@ -40,6 +40,13 @@ class TrainingConfig:
     scale_reg_max_ratio: float = 10.0
     scale_reg_weight: float = 0.1
 
+    # SH degree warmup: start at degree 0 (DC only) and increment by 1 every
+    # sh_increment_interval iterations until reaching sh_degree_max. Matches
+    # the original 3DGS schedule — early renders evaluate 1 SH coefficient
+    # instead of 16, so the first ~3000 iters are 4–16× cheaper in SH eval.
+    sh_degree_max: int = 3
+    sh_increment_interval: int = 1000
+
     # Training config
     iterations_per_video: int = 3e5
     batch_size: int = 4

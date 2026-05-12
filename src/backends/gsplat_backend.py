@@ -132,7 +132,8 @@ class GSplatBackend:
             viewpoint: Dict,
             bg_color: torch.Tensor = None,
             render_mode: str = "RGB+ED",
-            device: str = 'cuda'
+            device: str = 'cuda',
+            sh_degree: int = None,
     ) -> Dict:
         """
         Render with explicit depth output
@@ -157,7 +158,8 @@ class GSplatBackend:
             opacities = opacities.squeeze(-1)
 
         colors = gaussian_params.get('colors', gaussian_params.get('shs'))
-        sh_degree = 3 if 'shs' in gaussian_params else None
+        if sh_degree is None:
+            sh_degree = 3 if 'shs' in gaussian_params else None
 
         # Camera parameters
         viewmat = viewpoint['world_view_transform']
