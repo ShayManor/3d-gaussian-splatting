@@ -44,7 +44,10 @@ CACHE_DIR="${CACHE_DIR:-$SCRATCH/3dgs/cache}"
 STRIDE="${STRIDE:-5}"
 ITERATIONS="${ITERATIONS:-300000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
-MATCHER="${MATCHER:-loftr}"
+# Matcher choice. Default: sift (deterministic, reproducible, CPU-only).
+# Override to loftr (neural, faster, CUDA non-deterministic — different SfM
+# each run) or opencv (ORB; weak on small images, kept for tests).
+MATCHER="${MATCHER:-sift}"
 INITIAL_GAUSSIANS="${INITIAL_GAUSSIANS:-10000}"
 DENSIFY_CLONE_RATIO="${DENSIFY_CLONE_RATIO:-0.1}"
 DENSIFY_PRUNE_RATIO="${DENSIFY_PRUNE_RATIO:-2.0}"
