@@ -59,8 +59,6 @@ def main():
                         help="Clone if max_scale <= extent * ratio (default 0.1)")
     parser.add_argument("--densify_prune_extent_ratio", type=float, default=None,
                         help="Prune if max_scale > extent * ratio (default 2.0)")
-    parser.add_argument("--densify_max_growth_ratio", type=float, default=None,
-                        help="At most this fraction of n_gaussians may be added per densify event (default 0.05)")
     parser.add_argument("--scale_clamp_ratio", type=float, default=None,
                         help="Per-step hard cap on gaussian scale = scene_extent * ratio (default 0.2)")
 
@@ -92,8 +90,6 @@ def main():
         config.densify_clone_extent_ratio = args.densify_clone_extent_ratio
     if args.densify_prune_extent_ratio is not None:
         config.densify_prune_extent_ratio = args.densify_prune_extent_ratio
-    if args.densify_max_growth_ratio is not None:
-        config.densify_max_growth_ratio = args.densify_max_growth_ratio
     if args.scale_clamp_ratio is not None:
         config.scale_clamp_ratio = args.scale_clamp_ratio
     config.wandb_project = args.wandb_project
@@ -112,7 +108,10 @@ def main():
         focal_px=args.focal_px,
         focal_35mm=args.focal_35mm,
     )
-    merged_data = processor.process_videos(args.videos, stride=args.stride, use_cache=True)
+    # Always re-run SfM. Cache is invalidated by focal/intrinsics/matcher
+    # changes that aren't reflected in the cache filename, so reusing it
+    # silently propagates stale geometry into training.
+    merged_data = processor.process_videos(args.videos, stride=args.stride, use_cache=False)
 
     log(INFO, f"Processed {len(args.videos)} videos")
     log(INFO, f"Total 3D points: {len(merged_data['points_3d'])}")

@@ -380,6 +380,19 @@ class GaussianTrainer:
 
     # ----- Training step --------------------------------------------------
 
+    def _scale_ratio_reg(self, gaussians) -> torch.Tensor:
+        """
+        Splatfacto/PhysGaussian-style hinge penalty on per-gaussian scale
+        anisotropy. Zero when max/min scale ratio is at or below
+        `config.scale_reg_max_ratio`; grows linearly above. Prevents the
+        "needle" failure mode where one axis collapses to ~0 while another
+        sits at the scale clamp ceiling.
+        """
+        scales = gaussians.get_scaling  # (N, 3), already exp-activated
+        ratio = scales.amax(dim=-1) / scales.amin(dim=-1).clamp(min=1e-8)
+        hinge = ratio.clamp(min=self.config.scale_reg_max_ratio) - self.config.scale_reg_max_ratio
+        return self.config.scale_reg_weight * hinge.mean()
+
     def _training_step(self, gaussians, rasterizer, batch, optimizer):
         optimizer.zero_grad()
 
@@ -433,6 +446,9 @@ class GaussianTrainer:
         n = len(batch)
         total_loss = total_loss / n
 
+        scale_reg = self._scale_ratio_reg(gaussians)
+        total_loss = total_loss + scale_reg
+
         if self.scaler:
             self.scaler.scale(total_loss).backward()
             self.scaler.step(optimizer)
@@ -446,6 +462,7 @@ class GaussianTrainer:
             "l1": l1_total / n,
             "ssim": ssim_total / n,
             "psnr": psnr_total / n,
+            "scale_reg": float(scale_reg.detach().item()),
         }
 
     # ----- Validation -----------------------------------------------------
@@ -716,7 +733,6 @@ class GaussianTrainer:
                     optimizer=optimizer,
                     clone_extent_ratio=self.config.densify_clone_extent_ratio,
                     prune_extent_ratio=self.config.densify_prune_extent_ratio,
-                    max_growth_ratio=self.config.densify_max_growth_ratio,
                 )
                 self._wandb_log(
                     {
@@ -798,6 +814,7 @@ class GaussianTrainer:
                         "train/l1": step_metrics["l1"],
                         "train/ssim": step_metrics["ssim"],
                         "train/psnr": step_metrics["psnr"],
+                        "train/scale_reg": step_metrics["scale_reg"],
                         "train/lr_xyz": lr_xyz,
                         **lrs,
                         "train/n_gaussians": int(gaussians.xyz.shape[0]),

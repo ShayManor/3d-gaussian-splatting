@@ -39,9 +39,8 @@ BATCH_SIZE="${BATCH_SIZE:-4}"
 MATCHER="${MATCHER:-loftr}"
 INITIAL_GAUSSIANS="${INITIAL_GAUSSIANS:-10000}"
 MAX_GAUSSIANS="${MAX_GAUSSIANS:-2000000}"
-DENSIFY_CLONE_RATIO="${DENSIFY_CLONE_RATIO:-0.01}"
-DENSIFY_PRUNE_RATIO="${DENSIFY_PRUNE_RATIO:-0.5}"
-DENSIFY_MAX_GROWTH="${DENSIFY_MAX_GROWTH:-0.05}"
+DENSIFY_CLONE_RATIO="${DENSIFY_CLONE_RATIO:-0.1}"
+DENSIFY_PRUNE_RATIO="${DENSIFY_PRUNE_RATIO:-2.0}"
 SCALE_CLAMP_RATIO="${SCALE_CLAMP_RATIO:-0.2}"
 # Focal override: pass FOCAL_35MM=24 for iPhone main, etc. Empty = heuristic.
 FOCAL_PX="${FOCAL_PX:-}"
@@ -65,7 +64,6 @@ python -u -m src.train \
     --max_gaussians "$MAX_GAUSSIANS" \
     --densify_clone_extent_ratio "$DENSIFY_CLONE_RATIO" \
     --densify_prune_extent_ratio "$DENSIFY_PRUNE_RATIO" \
-    --densify_max_growth_ratio "$DENSIFY_MAX_GROWTH" \
     --scale_clamp_ratio "$SCALE_CLAMP_RATIO" \
     ${FOCAL_PX:+--focal_px "$FOCAL_PX"} \
     ${FOCAL_35MM:+--focal_35mm "$FOCAL_35MM"} \

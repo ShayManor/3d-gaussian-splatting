@@ -116,27 +116,18 @@ class GaussianModel(nn.Module):
         optimizer=None,
         clone_extent_ratio: float = 0.1,
         prune_extent_ratio: float = 2.0,
-        max_growth_ratio: float = 0.05,
     ):
         """
         Densify (clone + split) and prune gaussians in a single sweep.
 
         If `optimizer` is provided, Adam moment buffers (`exp_avg`, `exp_avg_sq`)
         are spliced through every parameter-tensor change, so per-parameter
-        momentum is preserved across densify events. Without this, every densify
-        wipes Adam's first/second moments and the optimizer spends ~hundreds of
-        iterations re-warming up its per-parameter step sizes.
+        momentum is preserved across densify events.
 
         `clone_extent_ratio` and `prune_extent_ratio` scale the densify
         thresholds against the scene extent:
           * clone candidates have `max_scale <= extent * clone_extent_ratio`
           * "too large" prune candidates have `max_scale > extent * prune_extent_ratio`
-
-        `max_growth_ratio` is a structural guard against runaway densify when
-        the loss can't actually settle (e.g., severely under-constrained scenes
-        with few views). At most `max_growth_ratio * n_before` new gaussians may
-        be added per event; if more candidates qualify, only the highest-gradient
-        ones are kept. Set to a large number (e.g., 10.0) to disable.
         """
         stats = {
             "cloned": 0,
@@ -144,8 +135,6 @@ class GaussianModel(nn.Module):
             "pruned": 0,
             "n_before": int(self.xyz.shape[0]),
         }
-        n_before = stats["n_before"]
-        max_added = max(1, int(max_growth_ratio * n_before))
 
         with torch.no_grad():
             grads = self.xyz_gradient_accum / (self.xyz_gradient_count + 1e-8)
@@ -164,17 +153,6 @@ class GaussianModel(nn.Module):
                 & (max_scale > extent * clone_extent_ratio)
                 & (opacity > min_opacity)
             )
-
-            # Cap total densify operations to max_added. If exceeded, retain the
-            # highest-gradient candidates only — those benefit most from densify.
-            n_clone = int(clone_mask.sum().item())
-            n_split = int(split_mask.sum().item())
-            total = n_clone + n_split
-            if total > max_added and total > 0:
-                want_clone = int(max_added * (n_clone / total))
-                want_split = max_added - want_clone
-                clone_mask = self._top_k_mask_by_grad(clone_mask, grads_norm, want_clone)
-                split_mask = self._top_k_mask_by_grad(split_mask, grads_norm, want_split)
 
             if clone_mask.sum() > 0:
                 stats["cloned"] = int(clone_mask.sum().item())
@@ -215,25 +193,6 @@ class GaussianModel(nn.Module):
 
         stats["n_after"] = int(self.xyz.shape[0])
         return stats
-
-    @staticmethod
-    def _top_k_mask_by_grad(mask: torch.Tensor, grads_norm: torch.Tensor, k: int) -> torch.Tensor:
-        """
-        Reduce a boolean mask to the k highest-gradient entries among those
-        currently True. Used to cap densify rate per event so the optimizer
-        gets time to settle parameters between events.
-        """
-        if k <= 0:
-            return torch.zeros_like(mask)
-        if int(mask.sum().item()) <= k:
-            return mask
-        idx = mask.nonzero(as_tuple=False).view(-1)
-        # Top-k by gradient norm among the masked entries.
-        top_k = torch.topk(grads_norm[idx], k=k).indices
-        chosen = idx[top_k]
-        out = torch.zeros_like(mask)
-        out[chosen] = True
-        return out
 
     def _clone_gaussians(self, mask, optimizer=None):
         """
