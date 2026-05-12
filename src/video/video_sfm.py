@@ -77,7 +77,7 @@ class VideoSFM:
 
         # Gates tuned for SIFT (sparse, conservative). LoFTR/dense matchers
         # comfortably exceed these on the first pair too.
-        MIN_MATCHES = 15
+        MIN_MATCHES = 8
         MIN_INLIERS = 30
         MIN_FLOW_PX = 4.0
         MIN_PNP_TRACKS = 8

@@ -51,7 +51,7 @@ class Calibrator:
                 self.matcher_type = "sift"
 
         if self.matcher_type == "sift":
-            self.alg = cv2.SIFT.create(nfeatures=600, contrastThreshold=0.01, edgeThreshold=20)
+            self.alg = cv2.SIFT.create(nfeatures=4000, contrastThreshold=0.005, edgeThreshold=20)
             self.matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
             return
 
