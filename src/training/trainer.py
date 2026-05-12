@@ -87,6 +87,19 @@ class GaussianTrainer:
         )
 
     @staticmethod
+    def _quantile_safe(x: torch.Tensor, qs: torch.Tensor, max_n: int = 1_000_000) -> torch.Tensor:
+        """
+        torch.quantile has an undocumented hard limit of ~2^24 elements and
+        crashes with `quantile() input tensor is too large` past it. With ~5.5M
+        gaussians × 3 axes the scaling tensor blows past this. Subsample for
+        logging — the percentile estimate is statistically indistinguishable.
+        """
+        if x.numel() > max_n:
+            idx = torch.randint(0, x.numel(), (max_n,), device=x.device)
+            x = x[idx]
+        return torch.quantile(x, qs)
+
+    @staticmethod
     def _stclamp(x: torch.Tensor) -> torch.Tensor:
         # Forward: clamp to [0,1] so L1/SSIM stay bounded when gsplat returns
         # un-clamped RGB. Backward: identity, so gaussians whose SH eval drifts
@@ -729,6 +742,19 @@ class GaussianTrainer:
         # at the top of train(); the merged cloud here is post-filter).
         if self.wandb_run is not None and len(merged_data["points_3d"]):
             try:
+                # Pull the actual focal length used (in pixels) and 35mm
+                # equivalent — this is the load-bearing intrinsic, and a wrong
+                # value (heuristic vs. true iPhone 24mm) silently poisons every
+                # downstream stage. Surfacing it in wandb means we can never
+                # again train a 12h job and only realize after that focal was
+                # wrong because an env var didn't propagate.
+                K0 = np.asarray(merged_data["all_intrinsics"][0])
+                f_px = float(K0[0, 0])
+                # Recover image dimensions from the principal point — the
+                # calibrator sets cx=W/2, cy=H/2 in identify_intrinsics.
+                long_axis = max(2.0 * float(K0[0, 2]), 2.0 * float(K0[1, 2]))
+                # 35mm-equivalent = (f_px / max(W,H)) * 36mm
+                f_35mm_equiv = (f_px / long_axis) * 36.0 if long_axis > 0 else 0.0
                 self._wandb_log(
                     {
                         "scene/extent": scene_extent,
@@ -739,9 +765,12 @@ class GaussianTrainer:
                         "scene/median_depth": median_depth,
                         "scene/n_cameras": int(sum(len(p) for p in merged_data["all_poses"])),
                         "scene/n_points_kept": int(len(merged_data["points_3d"])),
+                        "sfm/focal_px": f_px,
+                        "sfm/focal_35mm_equiv": f_35mm_equiv,
                     },
                     step=0,
                 )
+                log(INFO, f"Active focal: {f_px:.1f} px (~{f_35mm_equiv:.1f}mm 35mm-equiv)")
             except Exception as e:
                 log(WARNING, f"wandb scene stats log failed: {e}")
 
@@ -774,6 +803,7 @@ class GaussianTrainer:
                     optimizer=optimizer,
                     clone_extent_ratio=self.config.densify_clone_extent_ratio,
                     prune_extent_ratio=self.config.densify_prune_extent_ratio,
+                    max_gaussians=int(self.config.max_gaussians),
                 )
                 self._wandb_log(
                     {
@@ -787,6 +817,7 @@ class GaussianTrainer:
                         "densify/cumulative_split": self._cum_split,
                         "densify/cumulative_pruned": self._cum_pruned,
                         "densify/event_idx": self._densify_event_idx,
+                        "densify/capped": int(stats.get("capped", False)),
                     }
                 )
                 self._cum_cloned += stats["cloned"]
@@ -836,8 +867,9 @@ class GaussianTrainer:
                 with torch.no_grad():
                     op = gaussians.get_opacity.detach().reshape(-1)
                     sc = gaussians.get_scaling.detach().reshape(-1)
-                    op_q = torch.quantile(op, torch.tensor([0.5, 0.95, 0.99], device=op.device))
-                    sc_q = torch.quantile(sc, torch.tensor([0.5, 0.95, 0.99], device=sc.device))
+                    qs = torch.tensor([0.5, 0.95, 0.99], device=op.device)
+                    op_q = self._quantile_safe(op, qs)
+                    sc_q = self._quantile_safe(sc, qs)
                     grad_norms = {}
                     for name, p in (
                         ("xyz", gaussians.xyz),

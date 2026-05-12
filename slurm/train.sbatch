@@ -16,6 +16,14 @@
 #   MATCHER=opencv sbatch slurm/train.sbatch     # fallback matcher
 #
 # Output goes to runs/3dgs_j<JOBID>/ unless OUTPUT is set.
+#
+# IMPORTANT — submission-env propagation: `FOCAL_35MM=24 sbatch ...` relies on
+# slurm exporting the caller's environment to the job. Some clusters default to
+# --export=NONE, and `#!/bin/bash -l` re-runs login profiles that may clobber
+# custom vars. Both modes have bit us before, so the focal-length defaults
+# below are hard-coded to the iPhone 17 main camera (the actual capture device)
+# — overriding via env still works, but the job never silently falls back to
+# the 1.2*max(W,H) heuristic just because env didn't propagate.
 
 set -euo pipefail
 source $SCRATCH/venvs/3dgs/bin/activate
@@ -42,11 +50,23 @@ MAX_GAUSSIANS="${MAX_GAUSSIANS:-2000000}"
 DENSIFY_CLONE_RATIO="${DENSIFY_CLONE_RATIO:-0.1}"
 DENSIFY_PRUNE_RATIO="${DENSIFY_PRUNE_RATIO:-2.0}"
 SCALE_CLAMP_RATIO="${SCALE_CLAMP_RATIO:-0.2}"
-# Focal override: pass FOCAL_35MM=24 for iPhone main, etc. Empty = heuristic.
-FOCAL_PX="${FOCAL_PX:-}"
-FOCAL_35MM="${FOCAL_35MM:-}"
+# Focal override. Default to iPhone 17 main (24mm 35mm-equivalent). To use a
+# different camera, set FOCAL_35MM=X. To use the f=1.2*max(W,H) heuristic
+# instead, set FOCAL_35MM=0 explicitly. The `${VAR-default}` form (no colon)
+# means "default only if unset" — an empty env value is NOT overwritten — so
+# `FOCAL_35MM= sbatch ...` would also fall through to the heuristic.
+FOCAL_PX="${FOCAL_PX-}"
+FOCAL_35MM="${FOCAL_35MM-24}"
+# 0 is a sentinel meaning "no override, use heuristic".
+[ "$FOCAL_35MM" = "0" ] && FOCAL_35MM=""
 WANDB_PROJECT="${WANDB_PROJECT:-3d-gaussian-splatting}"
 WANDB_RUN_NAME="${WANDB_RUN_NAME:-3dgs_j${SLURM_JOB_ID}}"
+
+# Loud startup log so future runs are diagnosable from the slurm output alone.
+echo "[ENV] VIDEO='$VIDEO' STRIDE=$STRIDE BATCH_SIZE=$BATCH_SIZE MATCHER=$MATCHER" >&2
+echo "[ENV] FOCAL_PX='${FOCAL_PX}'" >&2
+echo "[ENV] FOCAL_35MM='${FOCAL_35MM}'" >&2
+echo "[ENV] MAX_GAUSSIANS=$MAX_GAUSSIANS DENSIFY_CLONE_RATIO=$DENSIFY_CLONE_RATIO DENSIFY_PRUNE_RATIO=$DENSIFY_PRUNE_RATIO" >&2
 
 [ ! -f "$VIDEO" ] && echo "ERROR: video not found: $VIDEO" && exit 1
 mkdir -p "$OUTPUT" "$CACHE_DIR"

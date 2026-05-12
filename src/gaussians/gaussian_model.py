@@ -116,6 +116,7 @@ class GaussianModel(nn.Module):
         optimizer=None,
         clone_extent_ratio: float = 0.1,
         prune_extent_ratio: float = 2.0,
+        max_gaussians: int = None,
     ):
         """
         Densify (clone + split) and prune gaussians in a single sweep.
@@ -128,13 +129,20 @@ class GaussianModel(nn.Module):
         thresholds against the scene extent:
           * clone candidates have `max_scale <= extent * clone_extent_ratio`
           * "too large" prune candidates have `max_scale > extent * prune_extent_ratio`
+
+        `max_gaussians` is a hard population cap. If the current count is at or
+        above the cap, no clone/split happens (prune still does). If the
+        projected post-densify count exceeds the cap, only the highest-gradient
+        clone+split candidates are kept — those benefit most from densification.
         """
         stats = {
             "cloned": 0,
             "split": 0,
             "pruned": 0,
             "n_before": int(self.xyz.shape[0]),
+            "capped": False,
         }
+        n_before = stats["n_before"]
 
         with torch.no_grad():
             grads = self.xyz_gradient_accum / (self.xyz_gradient_count + 1e-8)
@@ -153,6 +161,23 @@ class GaussianModel(nn.Module):
                 & (max_scale > extent * clone_extent_ratio)
                 & (opacity > min_opacity)
             )
+
+            # Enforce population cap. Each clone adds 1; each split removes the
+            # original and adds 2 (net +1). So projected delta = n_clone + n_split.
+            if max_gaussians is not None and n_before >= int(max_gaussians):
+                clone_mask = torch.zeros_like(clone_mask)
+                split_mask = torch.zeros_like(split_mask)
+                stats["capped"] = True
+            elif max_gaussians is not None:
+                n_clone = int(clone_mask.sum().item())
+                n_split = int(split_mask.sum().item())
+                n_allowed = int(max_gaussians) - n_before
+                if n_clone + n_split > n_allowed:
+                    stats["capped"] = True
+                    combined = clone_mask | split_mask
+                    keep = self._top_k_mask_by_grad(combined, grads_norm, n_allowed)
+                    clone_mask = clone_mask & keep
+                    split_mask = split_mask & keep
 
             if clone_mask.sum() > 0:
                 stats["cloned"] = int(clone_mask.sum().item())
@@ -193,6 +218,24 @@ class GaussianModel(nn.Module):
 
         stats["n_after"] = int(self.xyz.shape[0])
         return stats
+
+    @staticmethod
+    def _top_k_mask_by_grad(mask: torch.Tensor, grads_norm: torch.Tensor, k: int) -> torch.Tensor:
+        """
+        Reduce a boolean mask to the k highest-gradient entries among those
+        currently True. Used to enforce max_gaussians by keeping only the most
+        impactful densify candidates when the population cap would be exceeded.
+        """
+        if k <= 0:
+            return torch.zeros_like(mask)
+        if int(mask.sum().item()) <= k:
+            return mask
+        idx = mask.nonzero(as_tuple=False).view(-1)
+        top_k = torch.topk(grads_norm[idx], k=k).indices
+        chosen = idx[top_k]
+        out = torch.zeros_like(mask)
+        out[chosen] = True
+        return out
 
     def _clone_gaussians(self, mask, optimizer=None):
         """
