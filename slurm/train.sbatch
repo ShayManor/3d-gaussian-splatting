@@ -7,23 +7,8 @@
 #SBATCH -A lilly-rob1
 #SBATCH -p smallgpu
 #SBATCH --gres=gpu:1
-#SBATCH -o $SCRATCH/logs/3dgs-train_%j.out
-#SBATCH -e $SCRATCH/logs/3dgs-train_%j.err
-
-# Train a 3D Gaussian Splat from a single video. Override defaults via env:
-#
-#   VIDEO=./data/foo.mov STRIDE=3 ITERATIONS=150000 sbatch slurm/train.sbatch
-#   MATCHER=opencv sbatch slurm/train.sbatch     # fallback matcher
-#
-# Output goes to runs/3dgs_j<JOBID>/ unless OUTPUT is set.
-#
-# IMPORTANT — submission-env propagation: `FOCAL_35MM=24 sbatch ...` relies on
-# slurm exporting the caller's environment to the job. Some clusters default to
-# --export=NONE, and `#!/bin/bash -l` re-runs login profiles that may clobber
-# custom vars. Both modes have bit us before, so the focal-length defaults
-# below are hard-coded to the iPhone 17 main camera (the actual capture device)
-# — overriding via env still works, but the job never silently falls back to
-# the 1.2*max(W,H) heuristic just because env didn't propagate.
+#SBATCH -o /scratch/gautschi/%u/logs/3dgs-train_%j.out
+#SBATCH -e /scratch/gautschi/%u/logs/3dgs-train_%j.err
 
 set -euo pipefail
 source $SCRATCH/venvs/3dgs/bin/activate
@@ -41,12 +26,7 @@ VIDEO="${VIDEO:-./data/input.mp4}"
 # Big artifacts (checkpoints, PLYs) live on $SCRATCH — $HOME has tight quota.
 OUTPUT="${OUTPUT:-$SCRATCH/3dgs/runs/3dgs_j${SLURM_JOB_ID}}"
 CACHE_DIR="${CACHE_DIR:-$SCRATCH/3dgs/cache}"
-# Stride between sampled frames. At 60fps phone capture, stride=30 gives one
-# sample every ~0.5s — enough hand-motion parallax (~30-80 px) for SfM to
-# triangulate. Stride=5 was producing 83ms-apart pairs with ~3-8 px parallax
-# (sub-triangulation threshold), causing 98% pair rejection and 24-pose SfM.
-# nerfstudio's ns-process-data targets ~300 total frames; for a 6184-frame
-# video that maps to stride ~20. We use 30 for safer margin on slow motion.
+
 STRIDE="${STRIDE:-30}"
 ITERATIONS="${ITERATIONS:-300000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
