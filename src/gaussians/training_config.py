@@ -9,7 +9,10 @@ class TrainingConfig:
     """
 
     # Video Processing
-    frame_stride: int = 10  # sampling
+    # Frame stride for sampling. At 60fps, stride=30 = one sample per 0.5s,
+    # giving ~30-80px parallax per pair — enough for SfM triangulation.
+    # Smaller strides produce near-identical frames that can't triangulate.
+    frame_stride: int = 30  # sampling
     image_scale: float = 1.0
     cache_dir: str = "./cache"
     matcher: str = "sift"  # sift (default, deterministic) | loftr (CUDA neural) | opencv (ORB, tests)
